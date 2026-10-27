@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "crates/nautilus-world",
+    "crates/kuroshio-mesh",
+    "crates/lumeria-app-sdk",
+    "examples/hello_team",
+]
+resolver = "2"

@@ -1,0 +1,9 @@
+[package]
+name = "hello_team"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kuroshio-mesh = { path = "../../crates/kuroshio-mesh" }
+lumeria-app-sdk = { path = "../../crates/lumeria-app-sdk" }
+nautilus-world = { path = "../../crates/nautilus-world" }
