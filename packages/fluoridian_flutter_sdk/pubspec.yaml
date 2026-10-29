@@ -1,0 +1,22 @@
+name: fluoridian_flutter_sdk
+description: "Unified Flutter client SDK connecting directly to Atlantis, Triton Sonar Relay, and Fluorescent Viewports."
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: ">=3.10.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  web_socket_channel: ^3.0.1
+  http: ^1.2.0
+  crypto: ^3.0.3
+  ed25519_edwards: ^0.3.1
+  uuid: ^4.4.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  lints: ^3.0.0

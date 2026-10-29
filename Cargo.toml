@@ -3,6 +3,7 @@ members = [
     "crates/nautilus-world",
     "crates/kuroshio-mesh",
     "crates/lumeria-app-sdk",
+    "crates/kuroshio-mock-node",
     "examples/hello_team",
 ]
 resolver = "2"
