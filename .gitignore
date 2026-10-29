@@ -2,9 +2,5 @@ target/
 *.pdb
 *.exe
 .DS_Store
-
-# Flutter / Dart build & tool caches
-**/.dart_tool/
-**/build/
 *.env
 .env.*
