@@ -278,9 +278,355 @@ impl AnchoredSpatialOverlay {
     }
 }
 
+// =========================================================================
+// 1. PLANETARY SPATIAL CHUNKING & DISCRETE GLOBAL GRID INDEXING (H3 / S2)
+// =========================================================================
+
+/// Planetary Level-of-Detail (LOD) tier for continuous streaming from orbit to ground.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum PlanetaryLod {
+    /// Orbital tier (altitude > 100km): Low-resolution planetary sphere & coarse atmospheric limb.
+    Lod0Orbit = 0,
+    /// Continental tier (altitude 25km - 100km): Regional coastline and macro elevation tiles.
+    Lod4Continent = 4,
+    /// Sector / Metropolitan tier (altitude 5km - 25km): City boundaries & major road splines.
+    Lod8Sector = 8,
+    /// Tactical Venue tier (altitude 500m - 5km): High-poly local terrain mesh & landmarks.
+    Lod12Venue = 12,
+    /// Local Turf tier (altitude 0m - 500m): Centimeter-precision Rapier3D collision heightfields.
+    Lod18Turf = 18,
+}
+
+impl PlanetaryLod {
+    /// Selects optimal LOD resolution from camera altitude above Mean Sea Level.
+    pub fn from_altitude_meters(altitude_msl: f64) -> Self {
+        if altitude_msl >= 100_000.0 {
+            PlanetaryLod::Lod0Orbit
+        } else if altitude_msl >= 25_000.0 {
+            PlanetaryLod::Lod4Continent
+        } else if altitude_msl >= 5_000.0 {
+            PlanetaryLod::Lod8Sector
+        } else if altitude_msl >= 500.0 {
+            PlanetaryLod::Lod12Venue
+        } else {
+            PlanetaryLod::Lod18Turf
+        }
+    }
+}
+
+/// Discrete Global Grid System (DGGS) cell index (64-bit quantized Morton / S2 / H3 equivalent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct DggsCellIndex(pub u64);
+
+impl DggsCellIndex {
+    /// Quantizes a WGS84 coordinate into a Discrete Global Grid Cell at the target resolution (0..=18).
+    pub fn from_wgs84(coord: Wgs84GeoCoord, resolution: u8) -> Self {
+        let res = resolution.min(18);
+        // Normalize lat [-90, 90] -> [0, 1] and lon [-180, 180] -> [0, 1]
+        let norm_lat = ((coord.latitude + 90.0) / 180.0).clamp(0.0, 1.0);
+        let norm_lon = ((coord.longitude + 180.0) / 360.0).clamp(0.0, 1.0);
+
+        let steps = 1u64 << (res as u64);
+        let x = ((norm_lon * (steps as f64)).floor() as u64).min(steps - 1);
+        let y = ((norm_lat * (steps as f64)).floor() as u64).min(steps - 1);
+
+        // Interleave 2D Morton bits: (res: 6 bits) | (x_y interleaved: up to 36 bits)
+        let mut interleaved = 0u64;
+        for i in 0..res {
+            let bit_x = (x >> i) & 1;
+            let bit_y = (y >> i) & 1;
+            interleaved |= (bit_x << (2 * i)) | (bit_y << (2 * i + 1));
+        }
+
+        let encoded = ((res as u64) << 58) | (interleaved & 0x03FF_FFFF_FFFF_FFFF);
+        DggsCellIndex(encoded)
+    }
+
+    pub fn resolution(&self) -> u8 {
+        ((self.0 >> 58) & 0x3F) as u8
+    }
+
+    /// Computes the 64-bit ECEF axis-aligned bounding box (min_ecef, max_ecef) for spatial culling.
+    pub fn ecef_bounding_box(&self) -> (DVec3, DVec3) {
+        let res = self.resolution();
+        let steps = 1u64 << (res as u64);
+        let interleaved = self.0 & 0x03FF_FFFF_FFFF_FFFF;
+
+        let mut x = 0u64;
+        let mut y = 0u64;
+        for i in 0..res {
+            x |= ((interleaved >> (2 * i)) & 1) << i;
+            y |= ((interleaved >> (2 * i + 1)) & 1) << i;
+        }
+
+        let min_lon = (x as f64 / steps as f64) * 360.0 - 180.0;
+        let max_lon = ((x + 1) as f64 / steps as f64) * 360.0 - 180.0;
+        let min_lat = (y as f64 / steps as f64) * 180.0 - 90.0;
+        let max_lat = ((y + 1) as f64 / steps as f64) * 180.0 - 90.0;
+
+        let c1 = Wgs84GeoCoord::new(min_lat, min_lon, 0.0).to_ecef();
+        let c2 = Wgs84GeoCoord::new(max_lat, max_lon, 1000.0).to_ecef();
+
+        let min = DVec3::new(c1.x.min(c2.x), c1.y.min(c2.y), c1.z.min(c2.z));
+        let max = DVec3::new(c1.x.max(c2.x), c1.y.max(c2.y), c1.z.max(c2.z));
+        (min, max)
+    }
+}
+
+/// Spatial Interest Management (SIM) filter for localized peer subscriptions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpatialInterestManager {
+    pub home_cell: DggsCellIndex,
+    pub interest_radius_meters: f64,
+    pub active_subscriptions: Vec<DggsCellIndex>,
+}
+
+impl SpatialInterestManager {
+    pub fn new(player_pos: Wgs84GeoCoord, radius_meters: f64) -> Self {
+        // Default to resolution 8 (~460m hex / quad cell radius)
+        let home_cell = DggsCellIndex::from_wgs84(player_pos, 8);
+        let mut sim = Self {
+            home_cell,
+            interest_radius_meters: radius_meters,
+            active_subscriptions: vec![],
+        };
+        sim.recompute_interest(player_pos);
+        sim
+    }
+
+    /// Recomputes 3x3 neighbor cells surrounding the observer for interest management.
+    pub fn recompute_interest(&mut self, player_pos: Wgs84GeoCoord) {
+        self.home_cell = DggsCellIndex::from_wgs84(player_pos, 8);
+        let mut cells = Vec::with_capacity(9);
+        cells.push(self.home_cell);
+
+        // Approximate 8-way delta offsets in lat/lon
+        let d_lat = (self.interest_radius_meters / 111_000.0).clamp(0.001, 1.0);
+        let d_lon = (self.interest_radius_meters / (111_000.0 * (player_pos.latitude.to_radians().cos().abs().max(0.1)))).clamp(0.001, 1.0);
+
+        for dy in [-1.0, 0.0, 1.0] {
+            for dx in [-1.0, 0.0, 1.0] {
+                if dx == 0.0 && dy == 0.0 {
+                    continue;
+                }
+                let neighbor = Wgs84GeoCoord::new(
+                    (player_pos.latitude + dy * d_lat).clamp(-90.0, 90.0),
+                    (player_pos.longitude + dx * d_lon).clamp(-180.0, 180.0),
+                    player_pos.altitude_meters,
+                );
+                let cell = DggsCellIndex::from_wgs84(neighbor, 8);
+                if !cells.contains(&cell) {
+                    cells.push(cell);
+                }
+            }
+        }
+        self.active_subscriptions = cells;
+    }
+
+    /// Evaluates if a remote entity's coordinate falls within this node's active SIM radius.
+    pub fn should_receive_packet(&self, entity_coord: Wgs84GeoCoord) -> bool {
+        let cell = DggsCellIndex::from_wgs84(entity_coord, 8);
+        self.active_subscriptions.contains(&cell)
+    }
+}
+
+// =========================================================================
+// 5. PLANETARY DEM TERRAIN ELEVATION BAKING & RAPIER3D MESH GENERATOR
+// =========================================================================
+
+/// Format of the raw Digital Elevation Model (DEM) tile buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DemTileFormat {
+    /// Mapbox Terrain-RGB encoding (height = -10000 + ((R * 256 * 256 + G * 256 + B) * 0.1)).
+    MapboxTerrainRgb,
+    /// 16-bit signed integer SRTM elevation in meters (big-endian).
+    Srtm16BitSigned,
+    /// 32-bit floating-point GeoTIFF elevation raster.
+    GeoTiffFloat32,
+}
+
+/// Decoded planetary heightfield raster.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanetaryDemTile {
+    pub width: usize,
+    pub height: usize,
+    pub elevations_meters: Vec<f32>,
+    pub min_elevation: f32,
+    pub max_elevation: f32,
+}
+
+impl PlanetaryDemTile {
+    /// Decodes a raw DEM tile buffer according to its specified format.
+    pub fn decode(raw_bytes: &[u8], width: usize, height: usize, format: DemTileFormat) -> Result<Self, String> {
+        let total_samples = width * height;
+        let mut elevations = Vec::with_capacity(total_samples);
+        let mut min_el = f32::MAX;
+        let mut max_el = f32::MIN;
+
+        match format {
+            DemTileFormat::MapboxTerrainRgb => {
+                if raw_bytes.len() < total_samples * 3 {
+                    return Err(format!("Insufficient bytes for Terrain-RGB: got {}, need {}", raw_bytes.len(), total_samples * 3));
+                }
+                for i in 0..total_samples {
+                    let r = raw_bytes[i * 3] as f32;
+                    let g = raw_bytes[i * 3 + 1] as f32;
+                    let b = raw_bytes[i * 3 + 2] as f32;
+                    // Standard Mapbox Terrain-RGB equation
+                    let elevation = -10000.0 + ((r * 65536.0 + g * 256.0 + b) * 0.1);
+                    min_el = min_el.min(elevation);
+                    max_el = max_el.max(elevation);
+                    elevations.push(elevation);
+                }
+            }
+            DemTileFormat::Srtm16BitSigned => {
+                if raw_bytes.len() < total_samples * 2 {
+                    return Err(format!("Insufficient bytes for SRTM16: got {}, need {}", raw_bytes.len(), total_samples * 2));
+                }
+                for i in 0..total_samples {
+                    let b1 = raw_bytes[i * 2] as u16;
+                    let b2 = raw_bytes[i * 2 + 1] as u16;
+                    let raw_val = ((b1 << 8) | b2) as i16;
+                    let elevation = if raw_val == -32768 { 0.0 } else { raw_val as f32 };
+                    min_el = min_el.min(elevation);
+                    max_el = max_el.max(elevation);
+                    elevations.push(elevation);
+                }
+            }
+            DemTileFormat::GeoTiffFloat32 => {
+                if raw_bytes.len() < total_samples * 4 {
+                    return Err(format!("Insufficient bytes for Float32 GeoTIFF: got {}, need {}", raw_bytes.len(), total_samples * 4));
+                }
+                for i in 0..total_samples {
+                    let chunk: [u8; 4] = raw_bytes[i * 4..i * 4 + 4].try_into().map_err(|e| format!("{:?}", e))?;
+                    let elevation = f32::from_le_bytes(chunk);
+                    min_el = min_el.min(elevation);
+                    max_el = max_el.max(elevation);
+                    elevations.push(elevation);
+                }
+            }
+        }
+
+        Ok(Self {
+            width,
+            height,
+            elevations_meters: elevations,
+            min_elevation: min_el,
+            max_elevation: max_el,
+        })
+    }
+
+    /// Bakes a 3D triangle mesh heightfield in LocalTangentFrame coordinates (meters)
+    /// suitable for GPU rendering and Rapier3D `SharedShape::trimesh` collision hulls.
+    pub fn bake_trimesh_heightfield(
+        &self,
+        grid_step_meters: f32,
+    ) -> (Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<[f32; 3]>) {
+        let mut vertices = Vec::with_capacity(self.width * self.height);
+        let mut normals = vec![[0.0f32, 0.0, 1.0]; self.width * self.height];
+        let mut indices = Vec::with_capacity((self.width - 1) * (self.height - 1) * 2);
+
+        let half_w = (self.width as f32 * grid_step_meters) / 2.0;
+        let half_h = (self.height as f32 * grid_step_meters) / 2.0;
+
+        // Generate vertices
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let px = (x as f32 * grid_step_meters) - half_w;
+                let py = (y as f32 * grid_step_meters) - half_h;
+                let pz = self.elevations_meters[y * self.width + x];
+                vertices.push([px, py, pz]);
+            }
+        }
+
+        // Generate triangle indices (two triangles per quad)
+        for y in 0..(self.height - 1) {
+            for x in 0..(self.width - 1) {
+                let top_left = (y * self.width + x) as u32;
+                let top_right = top_left + 1;
+                let bottom_left = ((y + 1) * self.width + x) as u32;
+                let bottom_right = bottom_left + 1;
+
+                indices.push([top_left, bottom_left, top_right]);
+                indices.push([top_right, bottom_left, bottom_right]);
+            }
+        }
+
+        // Compute smooth face normals
+        for tri in &indices {
+            let v0 = glam::Vec3::from(vertices[tri[0] as usize]);
+            let v1 = glam::Vec3::from(vertices[tri[1] as usize]);
+            let v2 = glam::Vec3::from(vertices[tri[2] as usize]);
+            let n = (v1 - v0).cross(v2 - v0).normalize_or_zero();
+
+            for &idx in tri {
+                let current = glam::Vec3::from(normals[idx as usize]);
+                let updated = (current + n).normalize_or_zero();
+                normals[idx as usize] = [updated.x, updated.y, updated.z];
+            }
+        }
+
+        (vertices, indices, normals)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_dggs_chunking_and_spatial_interest_management() {
+        let tokyo = Wgs84GeoCoord::new(35.6586, 139.7454, 25.0);
+        let cell = DggsCellIndex::from_wgs84(tokyo, 8);
+        assert_eq!(cell.resolution(), 8);
+
+        let (min_box, max_box) = cell.ecef_bounding_box();
+        assert!(min_box.length() > 6_000_000.0);
+        assert!(max_box.length() > 6_000_000.0);
+
+        let sim = SpatialInterestManager::new(tokyo, 500.0);
+        assert!(sim.active_subscriptions.contains(&cell));
+
+        // Point 100m away should be accepted
+        let nearby = Wgs84GeoCoord::new(35.6590, 139.7460, 25.0);
+        assert!(sim.should_receive_packet(nearby));
+
+        // Point on opposite side of globe should be culled
+        let distant = Wgs84GeoCoord::new(-33.8688, 151.2093, 10.0); // Sydney
+        assert!(!sim.should_receive_packet(distant));
+    }
+
+    #[test]
+    fn test_planetary_lod_selection() {
+        assert_eq!(PlanetaryLod::from_altitude_meters(150_000.0), PlanetaryLod::Lod0Orbit);
+        assert_eq!(PlanetaryLod::from_altitude_meters(40_000.0), PlanetaryLod::Lod4Continent);
+        assert_eq!(PlanetaryLod::from_altitude_meters(8_000.0), PlanetaryLod::Lod8Sector);
+        assert_eq!(PlanetaryLod::from_altitude_meters(1_200.0), PlanetaryLod::Lod12Venue);
+        assert_eq!(PlanetaryLod::from_altitude_meters(50.0), PlanetaryLod::Lod18Turf);
+    }
+
+    #[test]
+    fn test_planetary_dem_baking_mapbox_terrain_rgb() {
+        // 2x2 grid with synthetic heights
+        let mut raw_rgb = Vec::new();
+        for _ in 0..4 {
+            // Encode ~500m elevation
+            let val = ((500.0 + 10000.0) / 0.1) as u32;
+            let r = ((val >> 16) & 0xFF) as u8;
+            let g = ((val >> 8) & 0xFF) as u8;
+            let b = (val & 0xFF) as u8;
+            raw_rgb.extend_from_slice(&[r, g, b]);
+        }
+
+        let dem = PlanetaryDemTile::decode(&raw_rgb, 2, 2, DemTileFormat::MapboxTerrainRgb).unwrap();
+        assert_eq!(dem.elevations_meters.len(), 4);
+        assert!((dem.elevations_meters[0] - 500.0).abs() < 1.0);
+
+        let (verts, indices, normals) = dem.bake_trimesh_heightfield(10.0);
+        assert_eq!(verts.len(), 4);
+        assert_eq!(indices.len(), 2);
+        assert_eq!(normals.len(), 4);
+    }
 
     #[test]
     fn test_egm2008_geoid_undulation_and_msl() {

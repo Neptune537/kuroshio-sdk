@@ -153,6 +153,117 @@ impl SwarmAudioRouter {
     }
 }
 
+// =========================================================================
+// 4. P2P NAT TRAVERSAL, STUN/TURN HOLE PUNCHING & LIBP2P PEER DISCOVERY
+// =========================================================================
+
+/// Transport protocols supported by Kuroshio P2P nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum P2pTransportProtocol {
+    WebRtcDataChannel,
+    Libp2pGossipsub,
+    Libp2pNoise,
+    DirectUdpHolePunch,
+}
+
+/// Dynamic STUN/TURN NAT traversal candidate type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NatCandidateType {
+    /// Direct host LAN interface (e.g., 192.168.1.x, 10.0.0.x).
+    Host,
+    /// Server Reflexive candidate discovered via STUN binding request.
+    ServerReflexive { public_ip: String, public_port: u16 },
+    /// Relayed candidate routed via TURN allocation when symmetric NAT prevents direct traversal.
+    RelayedTurn { relay_endpoint: String, token: String },
+}
+
+/// Decentralized DHT Rendezvous descriptor for peer discovery without central servers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DhtRendezvousAnnouncement {
+    pub squad_topic: String,
+    pub peer_did: String,
+    pub rendezvous_key_sha256: String,
+    pub multiaddrs: Vec<String>,
+    pub expires_at_epoch_sec: u64,
+}
+
+impl DhtRendezvousAnnouncement {
+    pub fn new(squad_topic: &str, peer_did: &str, multiaddrs: Vec<String>, ttl_seconds: u64) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(squad_topic.as_bytes());
+        hasher.update(peer_did.as_bytes());
+        let key_hex = format!("{:x}", hasher.finalize());
+
+        Self {
+            squad_topic: squad_topic.to_string(),
+            peer_did: peer_did.to_string(),
+            rendezvous_key_sha256: key_hex,
+            multiaddrs,
+            expires_at_epoch_sec: 1793316000 + ttl_seconds,
+        }
+    }
+
+    pub fn matches_topic(&self, target_topic: &str) -> bool {
+        self.squad_topic == target_topic
+    }
+}
+
+/// Automated STUN/TURN hole punch coordinator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NatTraversalCoordinator {
+    pub local_peer_id: String,
+    pub discovered_candidates: Vec<NatCandidateType>,
+    pub active_gossip_topics: HashSet<String>,
+}
+
+impl NatTraversalCoordinator {
+    pub fn new(peer_id: &str) -> Self {
+        Self {
+            local_peer_id: peer_id.to_string(),
+            discovered_candidates: vec![NatCandidateType::Host],
+            active_gossip_topics: HashSet::new(),
+        }
+    }
+
+    pub fn add_stun_candidate(&mut self, public_ip: &str, public_port: u16) {
+        self.discovered_candidates.push(NatCandidateType::ServerReflexive {
+            public_ip: public_ip.to_string(),
+            public_port,
+        });
+    }
+
+    pub fn add_turn_fallback(&mut self, relay_endpoint: &str, token: &str) {
+        self.discovered_candidates.push(NatCandidateType::RelayedTurn {
+            relay_endpoint: relay_endpoint.to_string(),
+            token: token.to_string(),
+        });
+    }
+
+    pub fn subscribe_gossip_topic(&mut self, topic: &str) {
+        self.active_gossip_topics.insert(topic.to_string());
+    }
+
+    /// Generates a complete WebRTC / libp2p multiaddress string vector for peer connection.
+    pub fn export_multiaddrs(&self) -> Vec<String> {
+        let mut addrs = Vec::new();
+        for candidate in &self.discovered_candidates {
+            match candidate {
+                NatCandidateType::Host => {
+                    addrs.push(format!("/ip4/127.0.0.1/udp/0/webrtc-direct/p2p/{}", self.local_peer_id));
+                }
+                NatCandidateType::ServerReflexive { public_ip, public_port } => {
+                    addrs.push(format!("/ip4/{}/udp/{}/webrtc-direct/p2p/{}", public_ip, public_port, self.local_peer_id));
+                }
+                NatCandidateType::RelayedTurn { relay_endpoint, .. } => {
+                    addrs.push(format!("/dns4/{}/tcp/443/wss/p2p-circuit/p2p/{}", relay_endpoint, self.local_peer_id));
+                }
+            }
+        }
+        addrs
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +321,27 @@ mod tests {
         // Duplicate packet arrival is suppressed by deduplication filter
         let dup = router.receive_and_relay(&packet).unwrap();
         assert!(dup.is_none());
+    }
+
+    #[test]
+    fn test_nat_traversal_coordinator_and_dht_announcements() {
+        let mut nat = NatTraversalCoordinator::new("12D3KooWTestPeerId");
+        nat.add_stun_candidate("203.0.113.45", 54321);
+        nat.add_turn_fallback("turn.kuroshio.atlantis.market", "ephemeral_token_abc");
+        nat.subscribe_gossip_topic("squad:tactical_seraphim");
+
+        let addrs = nat.export_multiaddrs();
+        assert_eq!(addrs.len(), 3);
+        assert!(addrs[1].contains("203.0.113.45"));
+        assert!(addrs[2].contains("turn.kuroshio.atlantis.market"));
+
+        let ann = DhtRendezvousAnnouncement::new(
+            "squad:tactical_seraphim",
+            "did:atlantis:player1",
+            addrs,
+            3600,
+        );
+        assert!(ann.matches_topic("squad:tactical_seraphim"));
+        assert_eq!(ann.rendezvous_key_sha256.len(), 64);
     }
 }

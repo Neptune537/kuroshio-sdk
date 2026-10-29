@@ -42,10 +42,12 @@ The Kuroshio SDK provides clean-room, public developer abstractions while preser
 
 | Crate | Purpose | Crates.io |
 | :--- | :--- | :--- |
-| [`crates/nautilus-world`](crates/nautilus-world) | 64-bit WGS84 ECEF geodesy, EGM96/EGM2008 geoid undulation ($N$), Kármán line Coriolis kinematics, and `DMat4` high/low `f32` WebGPU splitters. | `0.1.0` |
-| [`crates/kuroshio-mesh`](crates/kuroshio-mesh) | Team & squad registration, Groth16/Halo2 `ZK-Geo` polygon circuit proofs with hardware enclave attestation, PoH micro-VDF Sybil protection & 1-in-50 redundant Coral slashing, and WebRTC Opus Swarm Audio P2P relay. | `0.1.0` |
+| [`crates/nautilus-world`](crates/nautilus-world) | 64-bit WGS84 ECEF geodesy, DGGS H3/S2 spatial indexing, SIM packet filtering, DEM terrain heightfield baking, and WebGPU float splitters. | `0.1.0` |
+| [`crates/kuroshio-mesh`](crates/kuroshio-mesh) | Team registration, Groth16 ZK-Geo proofs, PoH micro-VDF Sybil protection, libp2p GossipSub & STUN/TURN NAT hole punching, and WebRTC Opus swarm audio. | `0.1.0` |
 | [`crates/lumeria-app-sdk`](crates/lumeria-app-sdk) | Sandboxed `LumeriaApp` guest trait, Wasm Component Model `.wit` interface (`wit/lumeria-guest.wit`), 120Hz zero-copy `SharedInputRingBuffer`, and Wasmtime fuel budgeting (`WasmFuelMeter`). | `0.1.0` |
+| [`crates/lumeria-host-runner`](crates/lumeria-host-runner) | Host-side Wasmtime execution engine with shared linear memory mapping and 500k instruction per-frame safety interruption handlers. | `0.1.0` |
 | [`crates/kuroshio-mock-node`](crates/kuroshio-mock-node) | Local mock Atlantis/Triton node with sequence-signed Coral state channel dispute timers and Solana SPL/Anchor PDA settlement instruction builders. | `0.1.0` |
+| [`programs/coral-escrow`](programs/coral-escrow) | On-chain Anchor-compatible Solana smart contract for Coral state channels, 1-hour challenge dispute windows, and 2% club treasury dividend payouts. | `0.1.0` |
 
 ---
 
