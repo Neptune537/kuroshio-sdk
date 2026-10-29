@@ -14,4 +14,5 @@ lumeria-app-sdk = { path = "../lumeria-app-sdk" }
 nautilus-world = { path = "../nautilus-world" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 thiserror = "1.0"

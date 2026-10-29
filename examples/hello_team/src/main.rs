@@ -1,4 +1,4 @@
-use kuroshio_mesh::{KuroshioTeam, MemberRole, SquadMember};
+use kuroshio_mesh::KuroshioTeam;
 use lumeria_app_sdk::{AppCapability, AppManifest, LumeriaApp, LumeriaHostCommand, LumeriaInputEvent};
 use nautilus_world::{AnchoredSpatialOverlay, Wgs84GeoCoord};
 

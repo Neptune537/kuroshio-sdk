@@ -1,0 +1,29 @@
+package kuroshio:lumeria-app-sdk@0.2.0;
+
+/// WebAssembly Component Model (WIT) Host/Guest Boundary for Sandboxed Lemuria Mini-Apps.
+interface types {
+    /// High-frequency 120Hz zero-copy telemetry & input frame stored in the shared ring buffer.
+    record zero-copy-input-frame {
+        sequence: u64,
+        pointer-x: f32,
+        pointer-y: f32,
+        ray-origin: tuple<f32, f32, f32>,
+        ray-dir: tuple<f32, f32, f32>,
+        vehicle-speed-ms: f32,
+        vehicle-rpm: f32,
+    }
+
+    variant host-command {
+        show-notification(tuple<string, string>),
+        play-spatial-audio(tuple<string, f32>),
+        request-escrow-checkout(tuple<string, f32>),
+        send-mesh-message(tuple<string, list<u8>>),
+    }
+}
+
+world lumeria-sandboxed-guest {
+    use types.{zero-copy-input-frame, host-command};
+
+    export on-init: func() -> result<_, string>;
+    export on-tick-with-fuel: func(dt-seconds: f32, remaining-fuel: u64) -> list<host-command>;
+}

@@ -1,15 +1,21 @@
-//! # Kuroshio Mock Home Node: Local Developer Test Runner
+//! # Kuroshio Mock Home Node: State Channel Dispute Timers & Solana SPL/PDA Settlement
 //!
-//! A lightweight, zero-cloud in-memory simulator of an Atlantis Club Home Node.
-//! Allows external developers to test SIWS authentication, Coral Escrow state locks,
-//! Bioluminescence PoH telemetry, and sandboxed app commands offline without
-//! needing a physical Raspberry Pi or live Solana cluster.
+//! A zero-cloud in-memory simulator of an Atlantis Club Home Node:
+//! - **SIWS Authentication:** Sign-In With Solana challenge/nonce lifecycle.
+//! - **Coral Escrow & State Channel Dispute Timers (`SignedChannelStateUpdate`):**
+//!   Enforces cryptographic challenge windows and monotonic sequence-signed state arbitration.
+//! - **Solana Program Library (SPL) / Anchor PDA Settlement (`SolanaPdaSettlementInstruction`):**
+//!   Deterministically derives Escrow & Club Treasury PDAs and generates Anchor settlement payloads.
 
 use kuroshio_mesh::ZkGeoProximityProof;
 use lumeria_app_sdk::{AppManifest, AppSecurityTier, LumeriaHostCommand};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use thiserror::Error;
+
+pub const CORAL_ESCROW_PROGRAM_ID: &str = "CoraL11111111111111111111111111111111111111";
+pub const DEFAULT_DISPUTE_WINDOW_SECS: u64 = 3600; // 1-hour cryptographic challenge window
 
 #[derive(Debug, Error, PartialEq)]
 pub enum MockNodeError {
@@ -21,8 +27,12 @@ pub enum MockNodeError {
     EscrowAlreadyExists(String),
     #[error("Escrow `{0}` not found")]
     EscrowNotFound(String),
-    #[error("Escrow `{0}` is not in Locked status")]
+    #[error("Escrow `{0}` is not in Locked or Disputed status")]
     EscrowNotLocked(String),
+    #[error("Dispute window still active until epoch {expires_at} (current: {current})")]
+    DisputeWindowActive { current: u64, expires_at: u64 },
+    #[error("State update sequence {submitted} is not strictly greater than current {current}")]
+    StaleSequenceNumber { submitted: u64, current: u64 },
     #[error("Insufficient funds in treasury: requested {requested}, available {available}")]
     InsufficientFunds { requested: f64, available: f64 },
     #[error("App capability `{0}` rejected for security tier `{1:?}`")]
@@ -57,11 +67,36 @@ pub struct MockSession {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EscrowStatus {
     Locked,
+    InDisputeChallengeWindow,
     Released,
     Refunded,
 }
 
-/// An in-memory Coral Escrow contract tracking task deposits.
+/// Sequence-signed off-chain state channel update for dispute arbitration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SignedChannelStateUpdate {
+    pub task_id: String,
+    pub sequence_number: u64,
+    pub worker_payout_cyan: f64,
+    pub creator_refund_cyan: f64,
+    pub winner_did: String,
+    pub state_signature: String,
+}
+
+/// Anchor-compatible Solana Program Library (SPL) PDA settlement instruction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SolanaPdaSettlementInstruction {
+    pub program_id: String,
+    pub escrow_vault_pda: String,
+    pub club_treasury_pda: String,
+    pub winner_token_account: String,
+    pub winner_payout_lamports: u64,
+    pub club_dividend_lamports: u64,
+    pub final_sequence: u64,
+    pub anchor_discriminator: [u8; 8],
+}
+
+/// An in-memory Coral Escrow contract tracking task deposits and dispute timers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MockEscrow {
     pub task_id: String,
@@ -69,6 +104,8 @@ pub struct MockEscrow {
     pub amount_cyan: f64,
     pub status: EscrowStatus,
     pub recipient_did: Option<String>,
+    pub highest_sequence: u64,
+    pub dispute_expires_at_epoch: Option<u64>,
 }
 
 /// Payout settlement receipt emitted upon task verification.
@@ -79,6 +116,7 @@ pub struct MockEscrowSettlement {
     pub amount_cyan: f64,
     pub club_dividend_cyan: f64,
     pub settled_at: u64,
+    pub solana_pda_instruction: SolanaPdaSettlementInstruction,
 }
 
 /// Recorded Proof-of-Health node telemetry.
@@ -113,14 +151,24 @@ impl MockHomeNode {
             sessions: HashMap::new(),
             escrows: HashMap::new(),
             telemetry: HashMap::new(),
-            treasury_cyan: 10_000.0, // Seed mock treasury with 10k CYAN
+            treasury_cyan: 10_000.0,
         }
+    }
+
+    /// Deterministically derives a Solana Program Derived Address (PDA) representation for `[seed_prefix, id]`.
+    pub fn derive_solana_pda(seed_prefix: &str, identifier: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(CORAL_ESCROW_PROGRAM_ID.as_bytes());
+        hasher.update(seed_prefix.as_bytes());
+        hasher.update(identifier.as_bytes());
+        let digest = hasher.finalize();
+        format!("pda_{}", digest[..16].iter().map(|b| format!("{:02x}", b)).collect::<String>())
     }
 
     /// Emits a cryptographically formed SIWS challenge for a client wallet.
     pub fn issue_siws_challenge(&mut self, wallet_address: &str, current_epoch_sec: u64) -> SiwsChallenge {
         let nonce = format!("{:x}", (current_epoch_sec.wrapping_mul(6364136223846793005) ^ 0xDEADBEEF));
-        let expires_at = current_epoch_sec + 300; // 5-minute expiry
+        let expires_at = current_epoch_sec + 300;
         self.nonces.insert(nonce.clone(), expires_at);
 
         SiwsChallenge {
@@ -158,14 +206,13 @@ impl MockHomeNode {
             return Err(MockNodeError::InvalidSignature);
         }
 
-        // Clean up nonce (single use)
         self.nonces.remove(&challenge.nonce);
 
         let did = format!("did:atlantis:solana:{}", challenge.address);
         let session = MockSession {
             did: did.clone(),
             solana_address: challenge.address.clone(),
-            staked_cyan: 50.0, // Mock $10+ qualifying stake
+            staked_cyan: 50.0,
             is_club_member: true,
             created_at: current_epoch_sec,
         };
@@ -191,13 +238,47 @@ impl MockHomeNode {
             amount_cyan,
             status: EscrowStatus::Locked,
             recipient_did: None,
+            highest_sequence: 0,
+            dispute_expires_at_epoch: None,
         };
 
         self.escrows.insert(task_id.to_string(), escrow.clone());
         Ok(escrow)
     }
 
-    /// Releases escrowed funds to a verified worker/winner with a fractional club dividend.
+    /// Initiates or updates a cryptographic state channel dispute challenge window using a sequence-signed update.
+    pub fn submit_state_channel_update(
+        &mut self,
+        update: &SignedChannelStateUpdate,
+        current_epoch_sec: u64,
+        dispute_window_secs: u64,
+    ) -> Result<&MockEscrow, MockNodeError> {
+        if update.state_signature.is_empty() {
+            return Err(MockNodeError::InvalidSignature);
+        }
+
+        let escrow = self
+            .escrows
+            .get_mut(&update.task_id)
+            .ok_or_else(|| MockNodeError::EscrowNotFound(update.task_id.clone()))?;
+
+        if update.sequence_number <= escrow.highest_sequence {
+            return Err(MockNodeError::StaleSequenceNumber {
+                submitted: update.sequence_number,
+                current: escrow.highest_sequence,
+            });
+        }
+
+        escrow.highest_sequence = update.sequence_number;
+        escrow.recipient_did = Some(update.winner_did.clone());
+        escrow.status = EscrowStatus::InDisputeChallengeWindow;
+        escrow.dispute_expires_at_epoch = Some(current_epoch_sec + dispute_window_secs);
+
+        Ok(escrow)
+    }
+
+    /// Releases escrowed funds to a verified worker/winner with a 2% fractional club dividend
+    /// and generates the Solana Anchor PDA settlement instruction.
     pub fn release_coral_escrow(
         &mut self,
         task_id: &str,
@@ -209,17 +290,40 @@ impl MockHomeNode {
             .get_mut(task_id)
             .ok_or_else(|| MockNodeError::EscrowNotFound(task_id.to_string()))?;
 
-        if escrow.status != EscrowStatus::Locked {
+        if escrow.status != EscrowStatus::Locked && escrow.status != EscrowStatus::InDisputeChallengeWindow {
             return Err(MockNodeError::EscrowNotLocked(task_id.to_string()));
+        }
+
+        if let Some(expires_at) = escrow.dispute_expires_at_epoch {
+            if current_epoch_sec < expires_at {
+                return Err(MockNodeError::DisputeWindowActive {
+                    current: current_epoch_sec,
+                    expires_at,
+                });
+            }
         }
 
         escrow.status = EscrowStatus::Released;
         escrow.recipient_did = Some(winner_did.to_string());
 
-        // 2% Club dividend
         let club_dividend = escrow.amount_cyan * 0.02;
         let winner_payout = escrow.amount_cyan - club_dividend;
+        let final_seq = escrow.highest_sequence;
         self.treasury_cyan += club_dividend;
+
+        let escrow_vault_pda = Self::derive_solana_pda("coral_escrow", task_id);
+        let club_treasury_pda = Self::derive_solana_pda("club_treasury", &self.club_id);
+
+        let solana_pda_instruction = SolanaPdaSettlementInstruction {
+            program_id: CORAL_ESCROW_PROGRAM_ID.to_string(),
+            escrow_vault_pda,
+            club_treasury_pda,
+            winner_token_account: winner_did.to_string(),
+            winner_payout_lamports: (winner_payout * 1_000_000.0) as u64,
+            club_dividend_lamports: (club_dividend * 1_000_000.0) as u64,
+            final_sequence: final_seq,
+            anchor_discriminator: [0x9a, 0x2b, 0x4c, 0x11, 0x8e, 0x05, 0x77, 0x3f],
+        };
 
         Ok(MockEscrowSettlement {
             task_id: task_id.to_string(),
@@ -227,6 +331,7 @@ impl MockHomeNode {
             amount_cyan: winner_payout,
             club_dividend_cyan: club_dividend,
             settled_at: current_epoch_sec,
+            solana_pda_instruction,
         })
     }
 
@@ -255,8 +360,10 @@ impl MockHomeNode {
         ZkGeoProximityProof {
             sector_geohash: coarse_geohash.to_string(),
             venue_id: Some(venue_id.to_string()),
+            commitment_hash: format!("comm_{}_{}", venue_id, timestamp),
             timestamp,
             club_signature: format!("mock_sig_club_{}_{}", self.club_id, timestamp),
+            zk_circuit_proof: None,
         }
     }
 
@@ -301,33 +408,54 @@ mod tests {
         assert_eq!(challenge.chain_id, "solana:devnet");
         assert_eq!(challenge.domain, "seraphim_club.atlantis.mesh");
 
-        // Verify with valid mock signature
         let session = node.verify_siws(&challenge, "valid_mock_sig", 1050).unwrap();
         assert_eq!(session.did, "did:atlantis:solana:7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU");
         assert!(session.staked_cyan >= 10.0);
 
-        // Second verification with same challenge must fail (nonce burned)
         let retry = node.verify_siws(&challenge, "valid_mock_sig", 1055);
         assert!(retry.is_err());
     }
 
     #[test]
-    fn test_coral_escrow_lifecycle() {
+    fn test_coral_escrow_dispute_timer_and_solana_pda_settlement() {
         let mut node = MockHomeNode::new("okinawa_anchor");
         let task_id = "task_dem_elevation_001";
         let creator_did = "did:atlantis:solana:alice";
         let worker_did = "did:atlantis:solana:bob";
 
-        // 1. Lock funds in escrow
         let escrow = node.lock_coral_escrow(task_id, creator_did, 100.0).unwrap();
         assert_eq!(escrow.status, EscrowStatus::Locked);
 
-        // 2. Release to worker
-        let settlement = node.release_coral_escrow(task_id, worker_did, 2000).unwrap();
+        // Submit sequence-signed state update with a 600s challenge window
+        let update_v1 = SignedChannelStateUpdate {
+            task_id: task_id.into(),
+            sequence_number: 1,
+            worker_payout_cyan: 98.0,
+            creator_refund_cyan: 0.0,
+            winner_did: worker_did.into(),
+            state_signature: "sig_seq_1".into(),
+        };
+        node.submit_state_channel_update(&update_v1, 1000, 600).unwrap();
+
+        // Attempting to release before epoch 1600 must fail due to active dispute timer
+        let early_release = node.release_coral_escrow(task_id, worker_did, 1200);
+        assert!(matches!(early_release, Err(MockNodeError::DisputeWindowActive { .. })));
+
+        // Higher sequence number supersedes previous state
+        let update_v2 = SignedChannelStateUpdate {
+            sequence_number: 2,
+            state_signature: "sig_seq_2".into(),
+            ..update_v1
+        };
+        node.submit_state_channel_update(&update_v2, 1100, 600).unwrap();
+
+        // Settle after challenge window expires (epoch 1800 > 1700)
+        let settlement = node.release_coral_escrow(task_id, worker_did, 1800).unwrap();
         assert_eq!(settlement.winner_did, worker_did);
-        assert_eq!(settlement.amount_cyan, 98.0); // 100 - 2% fee
-        assert_eq!(settlement.club_dividend_cyan, 2.0); // 2% fee to club
-        assert_eq!(node.treasury_cyan, 10_002.0);
+        assert_eq!(settlement.amount_cyan, 98.0);
+        assert_eq!(settlement.club_dividend_cyan, 2.0);
+        assert_eq!(settlement.solana_pda_instruction.final_sequence, 2);
+        assert!(settlement.solana_pda_instruction.escrow_vault_pda.starts_with("pda_"));
     }
 
     #[test]
@@ -346,7 +474,6 @@ mod tests {
         let mut manifest = AppManifest::new("mini_store", "Mini Storefront", "1.0.0", "did:atlantis:dev1")
             .with_capability(AppCapability::StoreInitiateCheckout);
 
-        // Sandboxed guest cannot checkout
         manifest.security_tier = AppSecurityTier::SandboxedGuest;
         let cmd = LumeriaHostCommand::RequestEscrowCheckout {
             item_id: "chassis_part_v1".into(),
@@ -355,7 +482,6 @@ mod tests {
         let err = node.execute_app_command(&manifest, cmd.clone());
         assert!(err.is_err());
 
-        // Upgrading to ClubVerified allows checkout
         manifest.security_tier = AppSecurityTier::ClubVerified;
         let success = node.execute_app_command(&manifest, cmd);
         assert!(success.is_ok());

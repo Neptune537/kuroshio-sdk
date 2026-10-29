@@ -72,15 +72,10 @@ impl KuroshioTeam {
     pub fn set_headquarters(&mut self, coord: Wgs84GeoCoord) {
         self.headquarters_anchor = Some(coord);
     }
-}
 
-/// Zero-Knowledge location disclosure token (prevents raw GPS leaks).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ZkGeoProximityProof {
-    pub sector_geohash: String,
-    pub venue_id: Option<String>,
-    pub timestamp: u64,
-    pub club_signature: String,
+    pub fn deposit_treasury(&mut self, amount_cyan: f64) {
+        self.treasury_cyan_balance += amount_cyan;
+    }
 }
 
 /// Coral State Channel micro-transaction (0.1 CYAN tipping / peer payments).
@@ -170,7 +165,8 @@ impl SevenDaughtersHost {
 
 /// Global 24/7 Siren Radio broadcast stream state and metadata.
 ///
-/// The broadcast originates as a single unified stream from the Raspberry Pi node.
+/// Supports both P2P WebRTC DataChannel Opus Swarm Audio (`OpusAudioSwarmFrame` on channel 432)
+/// and synchronized HTTP stream fallback from the Club Home Node (`10.0.0.60:8080`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SirenRadioStream {
     /// Canonical topic (e.g. `siren:frequency:global_stage`).
@@ -183,12 +179,15 @@ pub struct SirenRadioStream {
     pub current_track: String,
     /// Coral tip address for sending 0.1 CYAN tips to the active daughter on air.
     pub tip_channel_did: String,
+    /// Dedicated WebRTC DataChannel ID for P2P Opus Swarm Audio relay.
+    pub webrtc_swarm_channel_id: u64,
 }
 
 impl SirenRadioStream {
     pub const CANONICAL_TOPIC: &'static str = "siren:frequency:global_stage";
-    /// The single authoritative stream URL from the Raspberry Pi node.
-    pub const PI_STREAM_URL: &'static str = "http://10.0.0.237:8080/live.mp3";
+    pub const DEFAULT_SWARM_CHANNEL_ID: u64 = 432;
+    /// The authoritative stream URL from the Raspberry Pi Club Home Node (`zero@10.0.0.60`).
+    pub const PI_STREAM_URL: &'static str = "http://10.0.0.60:8080/live.mp3";
 
     /// Creates a default Siren Radio Stream state for the given UTC hour.
     pub fn new(utc_hour: u8) -> Self {
@@ -199,7 +198,27 @@ impl SirenRadioStream {
             stream_url: Self::PI_STREAM_URL.to_string(),
             current_track: format!("Siren 24/7 Live — Host: {:?}", active),
             tip_channel_did: format!("did:atlantis:radio:{:?}", active).to_lowercase(),
+            webrtc_swarm_channel_id: Self::DEFAULT_SWARM_CHANNEL_ID,
         }
+    }
+
+    /// Encapsulates a 48kHz Opus audio frame into a P2P WebRTC `MeshDataPacket` for squad swarm relay.
+    pub fn build_swarm_audio_packet(
+        &self,
+        sequence: u64,
+        ttl_hops: u8,
+        opus_frame_bytes: Vec<u8>,
+    ) -> Result<MeshDataPacket, serde_json::Error> {
+        let frame = OpusAudioSwarmFrame {
+            stream_topic: self.topic.clone(),
+            broadcaster_id: format!("{:?}", self.active_daughter),
+            sequence,
+            sample_rate_hz: 48000,
+            channels: 2,
+            ttl_hops,
+            opus_frame_bytes,
+        };
+        MeshDataPacket::from_opus_swarm_frame(self.webrtc_swarm_channel_id, &frame)
     }
 
     /// Creates a 0.1 CYAN Coral tip payload for the active host on air.
@@ -227,7 +246,7 @@ impl Default for OlympusSeedEndpoint {
     fn default() -> Self {
         Self {
             node_id: "olympus-seed-subpolar".to_string(),
-            http_ingress_url: "http://10.0.0.237:8080/api/v1/olympus/offload".to_string(),
+            http_ingress_url: "http://10.0.0.60:8080/api/v1/olympus/offload".to_string(),
             status: "ONLINE • SUBPOLAR_APEX".to_string(),
             max_batch_size: 64,
         }
