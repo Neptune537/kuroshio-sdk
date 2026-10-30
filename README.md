@@ -125,6 +125,10 @@ fn main() {
 For developers building Tier 2 community and client applications across **Windows PCs (low-spec/integrated GPU laptops)**, **Android (API 26+)**, and **Apple (iOS 16+ / macOS)**:
 
 ### 1. System Topology & Zero-Trust Invariants
+- **Platform Invariant (Dashboard & Companion In-App Menu Standard):** The **Dashboard** (formerly lite) is established as the official sovereign standard across the entire platform. It serves two unified roles:
+  1. **Standalone Companion App:** The primary desktop (Windows/macOS/Linux) and mobile (Android/iOS) hub for community task bounties, IRL spatial navigation, guild rosters, 24/7 Siren Radio, and wallet management.
+  2. **Standard In-App Menu Component:** The universal overlay HUD embedded inside all platform applications, games, and sub-apps (e.g., Lemuria AAA, Tactical Wings, and community WASM modules).
+- **Architecture Replacement:** Completely replaces legacy centralized app architectures (Flutter runtimes, Firebase/Firestore databases, and legacy tithX contracts) with **pure Rust, local SQLite caching, Coral State Channels, and Lumeria WASM sandboxing**.
 - **Platform Invariant (The Replacement for Lite):** All apps on the Kuroshio Gyre platform follow this universal sovereign standard: replacing legacy centralized app architectures (Flutter runtimes, Firebase/Firestore databases, and legacy `tithX` contracts) with **pure Rust, local SQLite caching, Coral State Channels, and Lumeria WASM sandboxing**.
 - **Tier 2 (Client Layer):** Pelagic client edge handling UI rendering (Slint/WebGPU), IRL spatial task & gig discovery, local Siren Radio playback, spatial mapping, and opt-in idle mesh relaying.
 - **Tier 3 (Headless Edge / Atlantis):** Headless workers (e.g. Raspberry Pi) dedicated to proof-of-health, DTN buffers, and state channel routing.
