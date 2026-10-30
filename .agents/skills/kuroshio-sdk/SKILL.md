@@ -211,9 +211,30 @@ impl LumeriaApp for MyGuestApp {
 
 ---
 
-## 6. Key Rules for Agents
+## 6. Tier 2 Cross-Platform Architecture & Hardening Pillars
+
+When authoring or auditing Tier 2 mobile and desktop client applications:
+1. **Platform-Native Secure Enclave Storage**:
+   - iOS: Keychain Services API with device-lock access bounds.
+   - Android: `AndroidKeyStore` StrongBox with biometrics/PIN protection.
+   - Windows: Windows DPAPI (`CryptProtectData`).
+   - In-memory representations must be strictly zeroized on drop.
+2. **Cellular / Wi-Fi Network Handoff**:
+   - Pre-buffer 5–10s of Opus audio in a lock-free ring buffer for uninterrupted Siren Radio listening.
+   - Renegotiate ICE/STUN candidates gracefully without resetting audio tracks or UI frames.
+   - Buffer uncommitted Coral micro-tips locally in an encrypted delay-tolerant queue (`DTNQueue`) during dead zones.
+3. **Storage Quotas & Offline State**:
+   - Enforce an LRU cache capped at **250 MB** for DEM elevation tiles and vector map data.
+   - Cap temporary radio chunk cache at **50 MB**.
+4. **Adaptive Resource Sharing**:
+   - Only engage libp2p GossipSub relaying or stream chunk seeding when connected to unmetered Wi-Fi/Ethernet, plugged into AC (or battery > 40%), and thermal status is nominal.
+
+---
+
+## 7. Key Rules for Agents
 1. **Zero Raw GPS Broadcasting**: Always enforce `LocationCoarse` or `ZK-Geo` coarse hashes. High-precision GPS is vaulted in the Club Home Node.
 2. **Dual-Precision Geodesy**: Keep world-space coordinates in 64-bit `DVec3`/`f64` ECEF; downscale to camera-relative 32-bit `Vec3`/`f32` in tangent frames before passing to shaders.
 3. **Pure Rust / Wasm**: Maintain pure Rust compatibility (`wasm32-unknown-unknown` friendly, zero non-standard C dependencies).
 4. **Single Raspberry Pi Radio Stream**: The entire Siren 24/7 radio broadcast is served strictly as a single unified stream originating from the local Raspberry Pi node (`http://10.0.0.237:8080/live.mp3`).
 5. **Two-Tier Compute Offload**: Edge and custom daemons run lightweight I/O and custom MCP tools on the Raspberry Pi node (`LocalPiNode`), offloading heavy model inference and root consensus batches to the Olympus Seed Node (`RemoteOlympusSeed`).
+6. **Olympus Untouched**: Tier 2 and Tier 3 clients must never create hard runtime dependencies on Olympus; Olympus operates independently of all edge node availability.

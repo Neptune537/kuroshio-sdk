@@ -120,6 +120,39 @@ fn main() {
 
 ---
 
+## 📱 Cross-Platform Tier 2 Architecture & Client Guidelines (PC, Android, iOS)
+
+For developers building Tier 2 community and client applications across **Windows PCs (low-spec/integrated GPU laptops)**, **Android (API 26+)**, and **Apple (iOS 16+ / macOS)**:
+
+### 1. System Topology & Zero-Trust Invariants
+- **Tier 2 (Client Layer):** Pelagic client edge handling UI rendering, local Siren Radio playback, spatial mapping, and opt-in idle mesh relaying.
+- **Tier 3 (Headless Edge / Atlantis):** Headless workers (e.g. Raspberry Pi) dedicated to proof-of-health, DTN buffers, and state channel routing.
+- **Olympus (Apex Keystone):** Remains 100% untouched and unencumbered. The network MUST NOT depend on Tier 2 client sessions.
+
+### 2. The Four Hardening Pillars
+1. **Secure Enclave Key Storage (`SecureKeyVault`):**
+   - **iOS / macOS:** Apple Keychain (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`).
+   - **Android:** Hardware-backed `AndroidKeyStore` (StrongBox Keymint when available) with zeroized memory buffers.
+   - **Windows:** Windows DPAPI (`CryptProtectData`) / Credential Manager.
+2. **Mobile Network Handoff & DTN Reconnection:**
+   - 5–10 second pre-buffered Opus audio ring buffer for Siren Radio to eliminate pops/clicks during 5G/Wi-Fi handoffs.
+   - Dynamic ICE candidate renegotiation for WebRTC swarm audio.
+   - Offline uncommitted Coral micro-tips buffered locally in an encrypted delay-tolerant queue (`DTNQueue`).
+3. **Bounded Storage & Offline Caching:**
+   - Hard **250 MB ceiling** (configurable up to 1 GB) enforced via LRU eviction for DEM heightfields and vector map tiles.
+   - Radio chunk temporary buffer capped at **50 MB**.
+4. **Adaptive Resource Sharing & Thermal Safety:**
+   - User toggle: `[x] Contribute Idle Compute & Mesh Relay`.
+   - Mesh relaying and chunk seeding automatically suspend if on cellular, battery < 40%, or CPU thermal state exceeds `Fair`.
+
+### 3. Multi-Target CI/CD Build Toolchains
+- **Windows:** `x86_64-pc-windows-msvc` (native standalone executable + Slint DirectX/Vulkan/software backend).
+- **Android:** `cargo-ndk` targeting `aarch64-linux-android` & `armv7-linux-androideabi` (generating JNI `.aar` libraries).
+- **Apple iOS / macOS:** `cargo-lipo` / `cargo-xcode` targeting `aarch64-apple-ios` & `aarch64-apple-darwin` (generating universal XCFrameworks).
+- **Wasm Sandbox:** `wasm32-unknown-unknown` validating `LumeriaApp` guest compliance.
+
+---
+
 ## 🛡️ Security & Privacy Standard
 
 1. **Zero GPS Leaks:** Apps interact with `LocationDisclosurePolicy` and `ZK-Geo` coarse sector proofs; high-precision GPS coordinates are permanently vaulted in the Club Home Node enclave.
