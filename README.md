@@ -7,9 +7,24 @@ The official public open SDK for building **decentralized teams, social squads, 
 
 ---
 
-## 🏛️ Architecture Overview
+## 🏛️ Architecture Overview: Nautilus IS the Playing Field
 
-The Kuroshio SDK provides clean-room, public developer abstractions while preserving and protecting internal engine IP (proprietary GPU shaders, direct-to-VRAM DRM decryption keys, and private hardware GPS enclaves remain sealed in private host runtimes).
+> [!IMPORTANT]
+> **Nautilus is not an abstract mini-map or a 2D GIS widget.** Nautilus **is the actual 3D playing field**.
+> The game engine renders the real, continuous Earth globe from **"God's Eye View" space orbits and continental heatmaps** all the way down into **tactical boots-on-the-ground first-person shooter (FPS) combat arenas, vehicle dynamics, and oceanic exploration** with zero loading screens.
+
+```
+       [ 🛰️ God's Eye View: Orbit & Satellites (Alt > 100km, SGP4, Global Heatmaps) ]
+                                          │
+                                          ▼  (Continuous Quadtree CDLOD Zoom)
+       [ 🌍 Continental & Metropolitan Sector Airspace (Alt 5km - 25km, H3 / SIM) ]
+                                          │
+                                          ▼  (Seamless Atmospheric Entry / Descent)
+       [ 🎯 Boots-on-the-Ground Tactical Battlefield (Alt < 500m, DEM Heights, 64-bit ECEF) ]
+         • First-Person ADS Scope Aiming & Ballistics (Verdansk / Tactical Arenas)
+         • Rapier3D Terrain Collision Mesh (LocalTangentFrame Centimeter Physics)
+         • Pacejka Vehicle Dynamics & Street-Level Co-op Squad Navigation
+```
 
 ```
                       +-----------------------------+

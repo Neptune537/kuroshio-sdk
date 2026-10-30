@@ -1,4 +1,23 @@
-//! # Nautilus World Geodetic Engine & High-Altitude Orbital Kinematics
+//! # Nautilus World: 1:1 Planetary Earth Digital Twin & Seamless FPS/Co-op Battleground
+//!
+//! **Nautilus IS the Playing Field:** The entire planet Earth is rendered as a continuous,
+//! 1:1 scale spherical globe that functions both as the strategic macro world ("God's Eye View"
+//! orbital tracking and heatmaps) and the direct, boots-on-the-ground tactical arena (first-person
+//! shooter combat, vehicle racing, and sub-oceanic exploration) without synthetic map boundaries
+//! or loading screens.
+//!
+//! ### The Seamless Macro-to-Micro Paradigm
+//! 1. **Orbital Macro Tier ("God's Eye View" / Satellite / Heatmap):**
+//!    - 3D ellipsoidal globe view tracking global squads, satellite orbital tracks (SGP4),
+//!      and social activity heatmaps across continents and oceans.
+//! 2. **Descent & Continuous Quadtree LOD:**
+//!    - Continuous geodetic level-of-detail transitions seamlessly from low-Earth orbit ($>100\text{ km}$)
+//!      down through continental, regional, and metropolitan airspace without loading boundaries.
+//! 3. **Boots-on-the-Ground Tactical Battlefield ($<500\text{ m}$):**
+//!    - Ground elevation derived from real-world Digital Elevation Models (DEM / SRTM / GeoTIFF / bathymetry).
+//!    - Local coordinates mapped to 64-bit WGS84 ECEF and transformed via [`LocalTangentFrame`]
+//!      into centimeter-level Cartesian physics for Rapier3D collision hulls, vehicle chassis,
+//!      and first-person combat scopes.
 //!
 //! Dual-coordinate precision geodesy, EGM96/EGM2008 geoid undulation, Coriolis kinematics,
 //! and double-precision shader splitters for planet Earth:
