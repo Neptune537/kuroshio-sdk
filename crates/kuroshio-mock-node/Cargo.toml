@@ -8,6 +8,10 @@ repository = "https://github.com/tritonSama/kuroshio-sdk"
 readme = "README.md"
 keywords = ["kuroshio", "mock", "test-runner", "escrow", "siws"]
 
+[features]
+default = []
+allow-production-mock = []
+
 [dependencies]
 kuroshio-mesh = { path = "../kuroshio-mesh" }
 lumeria-app-sdk = { path = "../lumeria-app-sdk" }

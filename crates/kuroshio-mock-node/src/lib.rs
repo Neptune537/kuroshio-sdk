@@ -7,6 +7,11 @@
 //! - **Solana Program Library (SPL) / Anchor PDA Settlement (`SolanaPdaSettlementInstruction`):**
 //!   Deterministically derives Escrow & Club Treasury PDAs and generates Anchor settlement payloads.
 
+#[cfg(all(not(debug_assertions), not(feature = "allow-production-mock")))]
+compile_error!(
+    "CRITICAL SECURITY VIOLATION: `kuroshio-mock-node` contains simulated test-key validators and cannot be compiled into release builds! To run synthetic benchmarks in release, you must explicitly pass `--features allow-production-mock`."
+);
+
 use kuroshio_mesh::ZkGeoProximityProof;
 use lumeria_app_sdk::{AppManifest, AppSecurityTier, LumeriaHostCommand};
 use serde::{Deserialize, Serialize};
