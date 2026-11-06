@@ -4,7 +4,6 @@ members = [
     "crates/kuroshio-mesh",
     "crates/lumeria-app-sdk",
     "crates/lumeria-host-runner",
-    "crates/kuroshio-mock-node",
     "programs/coral-escrow",
     "examples/hello_team",
 ]

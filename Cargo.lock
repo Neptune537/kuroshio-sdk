@@ -268,19 +268,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kuroshio-mock-node"
-version = "0.1.0"
-dependencies = [
- "kuroshio-mesh",
- "lumeria-app-sdk",
- "nautilus-world",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
