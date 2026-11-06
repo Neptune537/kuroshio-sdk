@@ -600,6 +600,46 @@ impl SpatialInterestManager {
         let cell = DggsCellIndex::from_wgs84(entity_coord, 8);
         self.active_subscriptions.contains(&cell)
     }
+
+    /// Evaluates proximity and interest strictly in 3D ECEF Cartesian space.
+    /// Completely immune to polar singularity collapse and the +/-180 degree antimeridian wrap seam.
+    pub fn is_in_ecef_interest_range(&self, observer_ecef: DVec3, target_ecef: DVec3) -> bool {
+        let dist_sq = (target_ecef - observer_ecef).length_squared();
+        dist_sq <= (self.interest_radius_meters * self.interest_radius_meters)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Seam-Free ECEF Spherical Bounding Box & Antimeridian Spatial Range
+// -----------------------------------------------------------------------------
+
+/// Continuous 3D ECEF spherical bounding zone for squad areas of interest (AoI).
+/// Operates exclusively in Cartesian $(X, Y, Z)$ coordinates, eliminating $\pm 180^\circ$ wrap
+/// bugs and polar longitudinal distortion.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EcefSpatialBoundingSphere {
+    pub center_ecef: DVec3,
+    pub radius_meters: f64,
+}
+
+impl EcefSpatialBoundingSphere {
+    pub fn from_wgs84(center: Wgs84GeoCoord, radius_meters: f64) -> Self {
+        Self {
+            center_ecef: center.to_ecef(),
+            radius_meters,
+        }
+    }
+
+    /// Evaluates if an entity's ECEF position lies within this spatial zone.
+    /// Never suffers from antimeridian wrap or polar singularities.
+    pub fn contains_ecef(&self, point_ecef: DVec3) -> bool {
+        (point_ecef - self.center_ecef).length_squared() <= (self.radius_meters * self.radius_meters)
+    }
+
+    /// Evaluates if an entity's WGS84 coordinate lies within this zone via ECEF conversion.
+    pub fn contains_wgs84(&self, coord: Wgs84GeoCoord) -> bool {
+        self.contains_ecef(coord.to_ecef())
+    }
 }
 
 // =========================================================================
@@ -1004,5 +1044,25 @@ mod tests {
         let hash2 = det1.canonical_hash();
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, det2.canonical_hash());
+    }
+
+    #[test]
+    fn test_antimeridian_wrap_and_polar_ecef_bounding_sphere() {
+        // Point right on antimeridian west side (+179.999 deg)
+        let west_coord = Wgs84GeoCoord::new(0.0, 179.999, 0.0);
+        // Point right on antimeridian east side (-179.999 deg)
+        let east_coord = Wgs84GeoCoord::new(0.0, -179.999, 0.0);
+
+        // Geodesic distance across the seam is only ~222 meters
+        let sphere = EcefSpatialBoundingSphere::from_wgs84(west_coord, 500.0);
+        // In naive longitude math: |-179.999 - 179.999| = 359.998 degrees (fails)
+        // In 3D ECEF Cartesian vector math: properly detected within 500m radius!
+        assert!(sphere.contains_wgs84(east_coord));
+
+        // North pole proximity check
+        let north_pole = Wgs84GeoCoord::new(89.999, 0.0, 0.0);
+        let pole_neighbor = Wgs84GeoCoord::new(89.999, 180.0, 0.0);
+        let pole_sphere = EcefSpatialBoundingSphere::from_wgs84(north_pole, 500.0);
+        assert!(pole_sphere.contains_wgs84(pole_neighbor));
     }
 }

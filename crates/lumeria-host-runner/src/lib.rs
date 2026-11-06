@@ -53,6 +53,8 @@ pub enum HostRunnerError {
     MemoryError(String),
     #[error("Manifest capability error: {0}")]
     ManifestError(String),
+    #[error("Host function TOCTOU violation: guest buffer pointer or length out of linear memory bounds")]
+    ToctouMemoryOutOfBounds,
 }
 
 /// Simulated Wasmtime Guest Instance State.
@@ -137,6 +139,25 @@ impl<const CAPACITY: usize> LumeriaHostRunner<CAPACITY> {
         self.ring_buffer.push_zero_copy(frame);
     }
 
+    /// Copies guest linear memory into an owned host buffer before validation and execution.
+    /// Completely defeats TOCTOU (Time-of-Check to Time-of-Use) attacks where a secondary
+    /// guest thread mutates linear memory while the host validates or executes an FFI payload.
+    pub fn copy_in_guest_buffer(
+        &self,
+        guest_linear_memory: &[u8],
+        offset: usize,
+        length: usize,
+    ) -> Result<Vec<u8>, HostRunnerError> {
+        let end = offset.checked_add(length).ok_or(HostRunnerError::ToctouMemoryOutOfBounds)?;
+        if end > guest_linear_memory.len() {
+            return Err(HostRunnerError::ToctouMemoryOutOfBounds);
+        }
+        // Atomic copy-in: create an owned snapshot before any validation occurs
+        let mut owned_copy = Vec::with_capacity(length);
+        owned_copy.extend_from_slice(&guest_linear_memory[offset..end]);
+        Ok(owned_copy)
+    }
+
     /// Executes one host render tick, enforcing strict Wasmtime fuel consumption.
     pub fn tick_frame(&mut self, delta_seconds: f32, estimated_fuel_needed: u64) -> Result<u64, HostRunnerError> {
         if !self.is_active {
@@ -210,5 +231,19 @@ mod tests {
         let mem_err = runner2.request_memory_grow(300);
         assert!(matches!(mem_err, Err(HostRunnerError::MemoryLimitExceeded { .. })));
         assert!(!runner2.is_active);
+
+        // Host-function TOCTOU copy-in boundary check
+        let mut guest_memory = vec![0u8; 1024];
+        guest_memory[10..14].copy_from_slice(b"CYAN");
+        let copied = runner2.copy_in_guest_buffer(&guest_memory, 10, 4).unwrap();
+        assert_eq!(copied, b"CYAN");
+        // Mutating guest linear memory does NOT affect the copied host buffer
+        guest_memory[10..14].copy_from_slice(b"EVIL");
+        assert_eq!(copied, b"CYAN");
+        // Out-of-bounds pointer is immediately rejected
+        assert_eq!(
+            runner2.copy_in_guest_buffer(&guest_memory, 1020, 10),
+            Err(HostRunnerError::ToctouMemoryOutOfBounds)
+        );
     }
 }

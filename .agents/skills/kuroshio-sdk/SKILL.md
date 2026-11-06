@@ -231,41 +231,42 @@ When authoring or auditing Tier 2 mobile and desktop client applications:
 
 ---
 
-## 7. Systems, Cryptographic & Operational Hardening (13-Pillar Lockdown)
+## 7. Systems, Cryptographic & Operational Hardening (19-Pillar Lockdown)
 
-1. **Deterministic Fixed-Point Geodesy for State Channels (`nautilus_world`)**:
-   - `DeterministicWgs84Coord` (micro-degrees, millimeter altitude) and `DeterministicVec3Fixed` (`fixed::types::I32F32`) eliminate cross-CPU float/FMA divergence between x86_64, ARM64, and Raspberry Pi nodes, preventing false Coral Escrow disputes.
-2. **Canonical BCS Serialization & Strict Ed25519 Signatures (`kuroshio_mesh::security`)**:
-   - `CanonicalCoralStateTranscript` uses binary canonical serialization (**BCS**) to prevent key-reordering/padding malleability, verified with `verify_strict` to reject malleable scalar S values and small-order points.
+1. **Deterministic Fixed-Point Geodesy (`nautilus_world`)**:
+   - `DeterministicWgs84Coord` and `DeterministicVec3Fixed` (`fixed::types::I32F32`) eliminate cross-CPU float divergence between x86_64, ARM64, and Raspberry Pi nodes, preventing false Coral disputes.
+2. **Canonical BCS Serialization & Strict Ed25519 (`kuroshio_mesh::security`)**:
+   - `CanonicalCoralStateTranscript` serializes via **BCS** to prevent signature malleability, validated with `verify_strict`.
 3. **Hardware Enclave Key Vault & `zeroize` (`kuroshio_mesh::security`)**:
-   - Implement `HardwareKeyVault` (`AndroidKeystoreStrongBox`, `AppleSecureEnclave`, `LinuxTpm2`, `WindowsDpapi`) so private keys never enter raw Rust heap memory.
-   - Wrap ephemeral session secrets in `EphemeralSessionSecret` (`ZeroizeOnDrop`).
-4. **Domain-Separated Coral State Channels & Watchtowers (`coral_escrow` & `kuroshio_mesh::security`)**:
-   - Bind every off-chain state update to `CoralDomainSeparator` (`chain_id`, `network_name`, `verifying_program_id`, `match_channel_id`) and enforce strictly monotonic nonces via `DomainSeparatedChannelState::verify_monotonic_transition`.
-   - Use `submit_watchtower_fraud_proof` on Tier 3 Atlantis Watchtowers to penalize stale state broadcasts and slash 10% (`WATCHTOWER_SLASH_BPS = 1000`) of a cheater's escrow deposit.
-5. **Bounded Deserialization & Anti-OOM Protections (`kuroshio_mesh::transport`)**:
-   - `MAX_NETWORK_FRAME_BYTES` (64 KiB) framing limits and bounded `bincode::DefaultOptions::new().with_limit(...)` (`from_bincode_bounded`) protect headless Raspberry Pi Atlantis nodes from $2^{30}$ length prefix memory allocation attacks.
-6. **Circuit Relay v2 Quotas & Priority QoS Dispatching (`kuroshio_mesh::transport`)**:
-   - `AtlantisRelayManager` limits active circuits (`DEFAULT_MAX_CIRCUITS_PER_PEER = 2`, `DEFAULT_MAX_CIRCUIT_BYTES = 1 MiB`, `120s` duration limit) preventing CGNAT hole-punching mobile clients from starving edge nodes.
-   - `MeshQosPriority` ensures Coral Escrow ledger settlement packets (`PAYLOAD_TYPE_CORAL_LEDGER_SETTLEMENT`) take priority over spatial gossip and Opus swarm audio.
-7. **Zero Location & Telemetry Leakage in Squad Discovery (`kuroshio_mesh::transport`)**:
-   - Public DHT and GossipSub topics use coarse 5-character Geohashes (`CoarseSpatialDiscoveryKey`).
-   - High-precision coordinates are only transmitted across mutually authenticated, end-to-end encrypted squad tunnels (`EncryptedSquadTunnelPayload`).
-8. **Noise/TLS 1.3 DID Binding, Mobile Handoff Tokens & GossipSub Anti-Eclipse (`kuroshio_mesh::transport`)**:
-   - Issue and verify `HandoffResumptionToken` (HMAC-SHA256 bound to PeerID, DID, and monotonic `handoff_generation`) during Wi-Fi to 5G handoffs.
-   - Enforce `GossipSubPeerScorer` (quadratic invalid message penalty, per-minute topic rate limits, and `/24` IPv4 subnet anti-eclipse limits).
-9. **FFI Panic Boundaries & Poison-Free State Concurrency (`lumeria_app_sdk`)**:
-   - Wrap all external guest FFI boundary calls in `catch_ffi_unwind` returning structured `FfiResultCode` to prevent undefined behavior unwinding into host runtimes.
-   - `PoisonFreeStateCell` uses `parking_lot::Mutex` to survive panics without lock poisoning.
-   - `AtomicChannelNonceState` prevents async cancellation (`tokio::select!`) from leaving state channel nonces out of sync.
-10. **Zero-WASI Capability Sandbox & Memory Caps (`lumeria_host_runner`)**:
-    - Audit guest modules with `WasiSandboxPolicy::strict_zero_wasi()` (`audit_wasm_imports`) to block `wasi_snapshot_preview1` filesystem/socket imports, enforce 500k per-frame instruction fuel limits, and cap linear memory at 256 pages (`16 MiB`) via `request_memory_grow()`.
-11. **Olympus Tier Boundary Isolation (`olympus-core` Feature & `deny.toml`)**:
-    - Compile Olympus targets with `--no-default-features --features olympus-core` and validate with `cargo-deny` (`deny.toml`) so Tier 2/3 networking dependencies never enter Tier 1.
-12. **Supply-Chain & Pure-Rust Cross-Compilation Hardening (`deny.toml`)**:
-    - Banning `openssl`, `openssl-sys`, and `native-tls` in `deny.toml` ensures pure-Rust compilation for Android (`aarch64-linux-android`) and Raspberry Pi (`aarch64-unknown-linux-gnu`).
-13. **Geodetic Deserialization Sanitization (`nautilus_world`)**:
-    - All `Wgs84GeoCoord`, `KinematicStateVector`, and `AnchoredSpatialOverlay` payloads enforce custom Serde deserializers rejecting `NaN`, `Infinity`, and out-of-bounds geodetic coordinates at the deserialization boundary.
+   - Enforces `HardwareKeyVault` (Android StrongBox, Apple Secure Enclave, Linux TPM 2.0, Windows DPAPI); session secrets zeroize on drop.
+4. **Slot-Height Anchored Disputes & Anti-Clock Drift (`coral_escrow`)**:
+   - State channel dispute windows (`DISPUTE_CHALLENGE_WINDOW_SLOTS = 9000`) and payouts anchor strictly to Solana ledger slot heights instead of wall-clock `SystemTime::now()`, protecting edge nodes from clock drift and RTC absence.
+5. **Ephemeral Session Certificates & CRDT Revocation (`kuroshio_mesh::security`)**:
+   - Root DID keys sign short-lived slot-bounded `EphemeralSessionCertificate` instances. `CrdtRevocationList` broadcasts revoked keys over Gossipsub control channels so compromised nodes are immediately dropped without waiting on an upstream ledger sync.
+6. **Hybrid Logical Clocks (`kuroshio_mesh::security`)**:
+   - `HybridLogicalClock` combines ledger slot heights and Lamport counters to guarantee causal event ordering without wall-clock reliance.
+7. **Host-Function TOCTOU Elimination (`lumeria_host_runner`)**:
+   - `copy_in_guest_buffer` copies guest linear memory slices into owned host `Vec<u8>` buffers before validation or execution, completely eliminating race conditions from concurrent guest threads.
+8. **Anti-Leak Multiaddr Filtering (`kuroshio_mesh::transport`)**:
+   - `sanitize_multiaddrs_for_external_broadcast` strips RFC 1918 private subnets, loopback, and Docker bridge IPs from external DHT announcements, protecting internal home lab and edge subnets.
+9. **Crash-Resilient ACID Storage (`kuroshio_mesh::security` via `redb`)**:
+   - `AtlantisCrashResilientStorage` uses `redb` copy-on-write ACID transactions with synchronous WAL flushing to protect Raspberry Pi nodes from sudden power cuts, keeping ephemeral scoring in tmpfs to avoid flash wear.
+10. **Seam-Free 3D ECEF Spatial Bounding (`nautilus_world`)**:
+    - `EcefSpatialBoundingSphere` and `is_in_ecef_interest_range` calculate distances and AoI queries in continuous 3D ECEF Cartesian space, eliminating polar singularities and the $\pm 180^\circ$ antimeridian wrap seam.
+11. **Bounded Deserialization & Anti-OOM Protections (`kuroshio_mesh::transport`)**:
+    - `MAX_NETWORK_FRAME_BYTES` (64 KiB) and `from_bincode_bounded` prevent malicious length-prefix attacks from crashing edge nodes.
+12. **Circuit Relay v2 Quotas & Priority QoS (`kuroshio_mesh::transport`)**:
+    - `AtlantisRelayManager` limits active relay circuits (`1 MiB`, `120s`, max 2 per peer); `PAYLOAD_TYPE_CORAL_LEDGER_SETTLEMENT` takes top QoS priority.
+13. **Zero Location Leakage (`kuroshio_mesh::transport`)**:
+    - Public topics use coarse 5-character Geohashes; raw 64-bit coordinates only traverse encrypted squad tunnels.
+14. **FFI Panic Boundaries & Poison-Free Concurrency (`lumeria_app_sdk`)**:
+    - `catch_ffi_unwind` wraps guest FFI boundaries; `PoisonFreeStateCell` uses `parking_lot::Mutex`; `AtomicChannelNonceState` isolates async cancellation.
+15. **Zero-WASI Capability Sandbox & Fuel Limits (`lumeria_host_runner`)**:
+    - `WasiSandboxPolicy::strict_zero_wasi()` strips ambient syscalls; 500k instruction fuel budget and 16 MiB memory ceiling.
+16. **Olympus Tier Boundary Isolation (`olympus-core` Feature)**:
+    - Pure data structures isolated under `olympus-core`, preventing Tier 2/3 networking contamination.
+17. **Pure-Rust Supply Chain Hardening (`deny.toml`)**:
+    - Banning `openssl`, `openssl-sys`, and `native-tls` ensures seamless cross-compilation across Android and Raspberry Pi ARM64.
 
 ## 8. Key Rules for Agents
 1. **Zero Raw GPS Broadcasting**: Always enforce `LocationCoarse` or `ZK-Geo` coarse hashes. High-precision GPS is vaulted in the Club Home Node.

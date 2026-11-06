@@ -495,6 +495,39 @@ impl NatTraversalCoordinator {
         }
         addrs
     }
+
+    /// Sanitizes and filters multiaddresses before broadcasting to external DHT or GossipSub networks.
+    /// Completely strips RFC 1918 private subnets (192.168.x.x, 10.x.x.x, 172.16-31.x.x), loopback (127.x.x.x),
+    /// Docker bridge interfaces, and link-local ranges, preventing home-lab topology leakage unless on local LAN mDNS.
+    pub fn sanitize_multiaddrs_for_external_broadcast(&self, is_local_lan_mdns: bool) -> Vec<String> {
+        let addrs = self.export_multiaddrs();
+        if is_local_lan_mdns {
+            return addrs;
+        }
+
+        addrs
+            .into_iter()
+            .filter(|addr| {
+                if let Some(ip_str) = extract_ip4_from_multiaddr(addr) {
+                    if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                        // Strip private, loopback, link-local, and broadcast
+                        return !ip.is_private() && !ip.is_loopback() && !ip.is_link_local() && !ip.is_broadcast();
+                    }
+                }
+                // Allow public DNS4 relay endpoints
+                addr.contains("/dns4/")
+            })
+            .collect()
+    }
+}
+
+/// Helper parsing IPv4 segment from libp2p multiaddr string.
+fn extract_ip4_from_multiaddr(addr: &str) -> Option<&str> {
+    if let Some(rest) = addr.strip_prefix("/ip4/") {
+        rest.split('/').next()
+    } else {
+        None
+    }
 }
 
 // =========================================================================
@@ -868,5 +901,26 @@ mod tests {
         assert_eq!(key.geohash_prefix.len(), 5);
         let topic = key.to_discovery_topic();
         assert!(topic.starts_with("kuroshio:discovery:xn7"));
+    }
+
+    #[test]
+    fn test_multiaddr_sanitization_blocks_private_ip_leakage() {
+        let mut nat = NatTraversalCoordinator::new("12D3KooWSanitizeTest");
+        // Add private LAN, public STUN, and relayed TURN
+        nat.add_stun_candidate("192.168.1.150", 4001); // Private RFC 1918 (should be filtered)
+        nat.add_stun_candidate("203.0.113.88", 54321);  // Public IP (should remain)
+        nat.add_turn_fallback("turn.relay.atlantis.market", "token_xyz");
+
+        // 1. External broadcast strips 127.0.0.1 and 192.168.1.150
+        let external_addrs = nat.sanitize_multiaddrs_for_external_broadcast(false);
+        assert_eq!(external_addrs.len(), 2);
+        assert!(!external_addrs.iter().any(|a| a.contains("127.0.0.1")));
+        assert!(!external_addrs.iter().any(|a| a.contains("192.168.1.150")));
+        assert!(external_addrs.iter().any(|a| a.contains("203.0.113.88")));
+        assert!(external_addrs.iter().any(|a| a.contains("turn.relay.atlantis.market")));
+
+        // 2. Local LAN mDNS keeps all discovered candidates
+        let local_addrs = nat.sanitize_multiaddrs_for_external_broadcast(true);
+        assert_eq!(local_addrs.len(), 4);
     }
 }
