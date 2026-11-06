@@ -33,6 +33,8 @@ pub enum SecurityError {
     StaleChannelNonce { current: u64, proposed: u64 },
     #[error("Channel ID mismatch: expected `{expected}`, got `{provided}`")]
     ChannelIdMismatch { expected: String, provided: String },
+    #[error("BCS serialization error: {0}")]
+    BcsError(String),
     #[error("Invalid cryptographic signature")]
     InvalidSignature,
 }
@@ -138,6 +140,60 @@ impl CoralDomainSeparator {
 
     pub fn domain_hash_hex(&self) -> String {
         self.domain_hash().iter().map(|b| format!("{:02x}", b)).collect()
+    }
+}
+
+/// Canonical structured payload serialized strictly via BCS (Binary Canonical Serialization)
+/// ensuring zero padding ambiguity, deterministic key ordering, and complete signature immutability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanonicalCoralStateTranscript {
+    pub domain_separator: CoralDomainSeparator,
+    pub channel_id: String,
+    pub monotonic_nonce: u64,
+    pub recipient_did: String,
+    pub recipient_amount_lamports: u64,
+    pub refund_amount_lamports: u64,
+}
+
+impl CanonicalCoralStateTranscript {
+    /// Serializes transcript strictly using BCS (Binary Canonical Serialization).
+    pub fn to_bcs_bytes(&self) -> Result<Vec<u8>, SecurityError> {
+        bcs::to_bytes(self).map_err(|e| SecurityError::BcsError(e.to_string()))
+    }
+
+    /// Computes the canonical 32-byte signing digest over BCS-encoded bytes.
+    pub fn signing_digest(&self) -> Result<[u8; 32], SecurityError> {
+        let bcs_bytes = self.to_bcs_bytes()?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"CORAL_BCS_V1:");
+        hasher.update(&bcs_bytes);
+        Ok(hasher.finalize().into())
+    }
+
+    /// Signs the canonical BCS digest using ed25519-dalek SigningKey.
+    pub fn sign_strict(&self, signing_key: &ed25519_dalek::SigningKey) -> Result<[u8; 64], SecurityError> {
+        use ed25519_dalek::Signer;
+        let digest = self.signing_digest()?;
+        let signature = signing_key.sign(&digest);
+        Ok(signature.to_bytes())
+    }
+
+    /// Verifies the signature with strict Ed25519 verification (`verify_strict`),
+    /// rejecting malleable scalar S values and small-order points.
+    pub fn verify_signature_strict(
+        &self,
+        verifying_key_bytes: &[u8; 32],
+        signature_bytes: &[u8; 64],
+    ) -> Result<(), SecurityError> {
+        use ed25519_dalek::{Signature, VerifyingKey};
+        let verifying_key = VerifyingKey::from_bytes(verifying_key_bytes)
+            .map_err(|_| SecurityError::InvalidSignature)?;
+        let signature = Signature::from_bytes(signature_bytes);
+        let digest = self.signing_digest()?;
+        verifying_key
+            .verify_strict(&digest, &signature)
+            .map_err(|_| SecurityError::InvalidSignature)?;
+        Ok(())
     }
 }
 
@@ -265,5 +321,39 @@ mod tests {
 
         // 3. Cross-match replay onto Match 2 is blocked by channel/domain mismatch
         assert!(state_v1.verify_against_domain(&domain_match_2, 0).is_err());
+    }
+
+    #[test]
+    fn test_canonical_bcs_serialization_and_ed25519_strict_verification() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x55u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+
+        let domain = CoralDomainSeparator::new(
+            "solana:mainnet-beta",
+            "CoraL11111111111111111111111111111111111111",
+            "channel_bcs_777",
+        );
+
+        let transcript = CanonicalCoralStateTranscript {
+            domain_separator: domain,
+            channel_id: "channel_bcs_777".into(),
+            monotonic_nonce: 42,
+            recipient_did: "did:atlantis:champion".into(),
+            recipient_amount_lamports: 500_000_000,
+            refund_amount_lamports: 50_000_000,
+        };
+
+        // 1. BCS bytes are canonical and non-empty
+        let bcs_bytes = transcript.to_bcs_bytes().unwrap();
+        assert!(!bcs_bytes.is_empty());
+
+        // 2. Strict sign and verify
+        let sig = transcript.sign_strict(&signing_key).unwrap();
+        assert!(transcript.verify_signature_strict(&verifying_key.to_bytes(), &sig).is_ok());
+
+        // 3. Any tampered field breaks the verification
+        let mut tampered = transcript.clone();
+        tampered.monotonic_nonce = 43;
+        assert!(tampered.verify_signature_strict(&verifying_key.to_bytes(), &sig).is_err());
     }
 }

@@ -31,9 +31,11 @@ multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
 # Explicitly forbid heavy unvetted C/OpenSSL or centralized cloud SDKs in pure-Rust workspace
+# Enforces pure-Rust backends (rustls / ed25519-dalek) for cross-compilation across ARM64 Linux, Android, and iOS
 deny = [
     { name = "openssl" },
     { name = "openssl-sys" },
+    { name = "native-tls" },
 ]
 
 [sources]

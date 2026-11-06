@@ -11,6 +11,16 @@ pub const PAYLOAD_TYPE_HZB_OCCLUSION: u8 = 0x01;
 pub const PAYLOAD_TYPE_PHYSICS_STATE: u8 = 0x02;
 pub const PAYLOAD_TYPE_TELEMETRY: u8 = 0x03;
 pub const PAYLOAD_TYPE_OPUS_SWARM_AUDIO: u8 = 0x04;
+/// Coral Escrow state transition & ledger settlement packet (Highest QoS priority)
+pub const PAYLOAD_TYPE_CORAL_LEDGER_SETTLEMENT: u8 = 0x05;
+
+/// Maximum frame size permitted on Atlantis/Lumeria framing codecs (64 KiB)
+/// Blocks malicious length-prefixed OOM allocation bombs on headless Raspberry Pi edge nodes.
+pub const MAX_NETWORK_FRAME_BYTES: usize = 65_536;
+/// Maximum circuit bytes allowed on Atlantis libp2p Circuit Relay v2 before throttling
+pub const DEFAULT_MAX_CIRCUIT_BYTES: u64 = 1_048_576; // 1 MiB per circuit
+/// Maximum active circuits allowed per mobile peer on Atlantis relay
+pub const DEFAULT_MAX_CIRCUITS_PER_PEER: usize = 2;
 
 /// WebRTC Session Description Protocol (SDP) exchange for P2P Gyre mesh links.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -85,9 +95,37 @@ impl MeshDataPacket {
         serde_json::to_vec(self)
     }
 
-    /// Deserializes packet from binary bytes.
+    /// Deserializes packet from binary bytes with strict frame-length limits.
+    /// Rejects any packet exceeding `MAX_NETWORK_FRAME_BYTES` to protect edge nodes from OOM attacks.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        if bytes.len() > MAX_NETWORK_FRAME_BYTES {
+            return Err(serde::de::Error::custom(format!(
+                "Frame size {} exceeds maximum permitted limit {}",
+                bytes.len(),
+                MAX_NETWORK_FRAME_BYTES
+            )));
+        }
         serde_json::from_slice(bytes)
+    }
+
+    /// Serializes packet to binary using bounded Bincode options.
+    pub fn to_bincode_bounded(&self) -> Result<Vec<u8>, bincode::Error> {
+        use bincode::Options;
+        bincode::DefaultOptions::new()
+            .with_limit(MAX_NETWORK_FRAME_BYTES as u64)
+            .serialize(self)
+    }
+
+    /// Deserializes packet from binary using strictly bounded Bincode options.
+    /// Pre-allocation sizes are capped by the buffer size, preventing $2^{30}$ length prefix OOM attacks.
+    pub fn from_bincode_bounded(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        use bincode::Options;
+        if bytes.len() > MAX_NETWORK_FRAME_BYTES {
+            return Err(bincode::ErrorKind::SizeLimit.into());
+        }
+        bincode::DefaultOptions::new()
+            .with_limit(MAX_NETWORK_FRAME_BYTES as u64)
+            .deserialize(bytes)
     }
 }
 
@@ -157,6 +195,122 @@ impl SwarmAudioRouter {
 // 4. P2P NAT TRAVERSAL, STUN/TURN HOLE PUNCHING & LIBP2P PEER DISCOVERY
 // =========================================================================
 
+/// Circuit Relay v2 resource allocation and quota manager for Atlantis Tier 3 nodes.
+/// Prevents mobile Lumeria clients behind CGNAT from exhausting Atlantis network bandwidth and file descriptors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CircuitRelayQuotaConfig {
+    pub max_circuit_bytes: u64,
+    pub max_circuit_duration_secs: u32,
+    pub max_circuits_per_peer: usize,
+    pub max_total_circuits: usize,
+}
+
+impl Default for CircuitRelayQuotaConfig {
+    fn default() -> Self {
+        Self {
+            max_circuit_bytes: DEFAULT_MAX_CIRCUIT_BYTES,
+            max_circuit_duration_secs: 120,
+            max_circuits_per_peer: DEFAULT_MAX_CIRCUITS_PER_PEER,
+            max_total_circuits: 32,
+        }
+    }
+}
+
+/// Priority-based QoS packet dispatcher ensuring Coral Escrow ledger traffic takes precedence over spatial/voice gossip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MeshQosPriority {
+    GossipAudio = 0,
+    GossipSpatial = 1,
+    Telemetry = 2,
+    CoralLedgerSettlement = 3,
+}
+
+impl MeshQosPriority {
+    pub fn from_payload_type(payload_type: u8) -> Self {
+        match payload_type {
+            PAYLOAD_TYPE_CORAL_LEDGER_SETTLEMENT => Self::CoralLedgerSettlement,
+            PAYLOAD_TYPE_PHYSICS_STATE => Self::GossipSpatial,
+            PAYLOAD_TYPE_TELEMETRY => Self::Telemetry,
+            _ => Self::GossipAudio,
+        }
+    }
+}
+
+/// State tracker for an active Circuit Relay session on an Atlantis node.
+#[derive(Debug, Clone)]
+pub struct ActiveCircuit {
+    pub circuit_id: String,
+    pub peer_id: String,
+    pub bytes_transferred: u64,
+    pub opened_at_epoch_sec: u64,
+}
+
+/// Manages Circuit Relay v2 quotas and QoS dispatching on Atlantis nodes.
+pub struct AtlantisRelayManager {
+    pub config: CircuitRelayQuotaConfig,
+    pub active_circuits: std::collections::HashMap<String, ActiveCircuit>,
+}
+
+impl AtlantisRelayManager {
+    pub fn new(config: CircuitRelayQuotaConfig) -> Self {
+        Self {
+            config,
+            active_circuits: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Attempts to open a new circuit for a mobile peer behind CGNAT.
+    pub fn try_open_circuit(&mut self, circuit_id: &str, peer_id: &str, current_epoch_sec: u64) -> Result<(), &'static str> {
+        if self.active_circuits.len() >= self.config.max_total_circuits {
+            return Err("Relay capacity exhausted: total circuits limit reached");
+        }
+
+        let peer_circuit_count = self.active_circuits.values().filter(|c| c.peer_id == peer_id).count();
+        if peer_circuit_count >= self.config.max_circuits_per_peer {
+            return Err("Peer relay quota exceeded: max circuits per peer reached");
+        }
+
+        self.active_circuits.insert(
+            circuit_id.to_string(),
+            ActiveCircuit {
+                circuit_id: circuit_id.to_string(),
+                peer_id: peer_id.to_string(),
+                bytes_transferred: 0,
+                opened_at_epoch_sec: current_epoch_sec,
+            },
+        );
+        Ok(())
+    }
+
+    /// Records relayed bandwidth and checks for quota or duration exhaustion.
+    pub fn record_transfer(
+        &mut self,
+        circuit_id: &str,
+        bytes: usize,
+        current_epoch_sec: u64,
+    ) -> Result<(), &'static str> {
+        let circuit = self.active_circuits.get_mut(circuit_id).ok_or("Circuit not found")?;
+
+        if current_epoch_sec - circuit.opened_at_epoch_sec > self.config.max_circuit_duration_secs as u64 {
+            self.active_circuits.remove(circuit_id);
+            return Err("Relay circuit expired by duration limit");
+        }
+
+        circuit.bytes_transferred += bytes as u64;
+        if circuit.bytes_transferred > self.config.max_circuit_bytes {
+            self.active_circuits.remove(circuit_id);
+            return Err("Relay circuit terminated: bandwidth quota exceeded");
+        }
+
+        Ok(())
+    }
+
+    /// Closes an active circuit.
+    pub fn close_circuit(&mut self, circuit_id: &str) {
+        self.active_circuits.remove(circuit_id);
+    }
+}
+
 /// Transport protocols supported by Kuroshio P2P nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum P2pTransportProtocol {
@@ -207,6 +361,85 @@ impl DhtRendezvousAnnouncement {
     pub fn matches_topic(&self, target_topic: &str) -> bool {
         self.squad_topic == target_topic
     }
+}
+
+/// Coarse geohash / H3 cell representation for squad discovery and peer matchmaking.
+/// Prevents physical GPS or high-precision Nautilus coordinate leakage over public DHT and GossipSub topics.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CoarseSpatialDiscoveryKey {
+    /// Truncated geohash (e.g. 5-character string, ~4.9km x 4.9km city-neighborhood resolution)
+    pub geohash_prefix: String,
+    /// Squad activity tag / game mode
+    pub activity_tag: String,
+}
+
+impl CoarseSpatialDiscoveryKey {
+    pub const COARSE_GEOHASH_PRECISION: usize = 5;
+
+    pub fn from_coordinates(lat: f64, lon: f64, activity: &str) -> Self {
+        let full_geohash = encode_simple_geohash(lat, lon, Self::COARSE_GEOHASH_PRECISION);
+        Self {
+            geohash_prefix: full_geohash,
+            activity_tag: activity.to_string(),
+        }
+    }
+
+    /// Derives the public libp2p GossipSub topic string.
+    pub fn to_discovery_topic(&self) -> String {
+        format!("kuroshio:discovery:{}:{}", self.geohash_prefix, self.activity_tag)
+    }
+}
+
+/// Simple deterministic geohash encoder without external C libraries.
+pub fn encode_simple_geohash(latitude: f64, longitude: f64, precision: usize) -> String {
+    const BASE32: &[u8] = b"0123456789bcdefghjkmnpqrstuvwxyz";
+    let mut lat_interval = (-90.0, 90.0);
+    let mut lon_interval = (-180.0, 180.0);
+    let mut is_even = true;
+    let mut bit = 0;
+    let mut ch = 0;
+    let mut geohash = String::with_capacity(precision);
+
+    while geohash.len() < precision {
+        if is_even {
+            let mid = (lon_interval.0 + lon_interval.1) / 2.0;
+            if longitude >= mid {
+                ch |= 1 << (4 - bit);
+                lon_interval.0 = mid;
+            } else {
+                lon_interval.1 = mid;
+            }
+        } else {
+            let mid = (lat_interval.0 + lat_interval.1) / 2.0;
+            if latitude >= mid {
+                ch |= 1 << (4 - bit);
+                lat_interval.0 = mid;
+            } else {
+                lat_interval.1 = mid;
+            }
+        }
+
+        is_even = !is_even;
+        if bit < 4 {
+            bit += 1;
+        } else {
+            geohash.push(BASE32[ch as usize] as char);
+            bit = 0;
+            ch = 0;
+        }
+    }
+    geohash
+}
+
+/// Encrypted mutually authenticated squad tunnel payload for high-precision coordinate exchange.
+/// High-precision coordinates are strictly forbidden in public topics and can only be transmitted here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EncryptedSquadTunnelPayload {
+    pub sender_did: String,
+    pub recipient_did: String,
+    pub session_id: String,
+    pub encrypted_ciphertext_hex: String,
+    pub auth_tag_hex: String,
 }
 
 /// Automated STUN/TURN hole punch coordinator.
@@ -589,5 +822,51 @@ mod tests {
         let _ = scorer.validate_and_score_message("peer_b", false);
         let _ = scorer.validate_and_score_message("peer_b", false);
         assert!(scorer.validate_and_score_message("peer_b", true).is_err());
+    }
+
+    #[test]
+    fn test_atlantis_relay_manager_quotas_and_qos_priority() {
+        let mut relay = AtlantisRelayManager::new(CircuitRelayQuotaConfig {
+            max_circuit_bytes: 1000,
+            max_circuit_duration_secs: 10,
+            max_circuits_per_peer: 1,
+            max_total_circuits: 2,
+        });
+
+        // 1. Open circuit succeeds
+        assert!(relay.try_open_circuit("circ_1", "peer_mobile_1", 100).is_ok());
+
+        // 2. Second circuit from same peer exceeds quota
+        assert!(relay.try_open_circuit("circ_2", "peer_mobile_1", 100).is_err());
+
+        // 3. Bandwidth transfer tracking and limit enforcement
+        assert!(relay.record_transfer("circ_1", 500, 102).is_ok());
+        // Exceeding 1000 bytes terminates circuit
+        assert!(relay.record_transfer("circ_1", 600, 103).is_err());
+        assert!(!relay.active_circuits.contains_key("circ_1"));
+
+        // 4. QoS priority levels
+        assert!(MeshQosPriority::from_payload_type(PAYLOAD_TYPE_CORAL_LEDGER_SETTLEMENT) > MeshQosPriority::from_payload_type(PAYLOAD_TYPE_OPUS_SWARM_AUDIO));
+    }
+
+    #[test]
+    fn test_bounded_bincode_deserialization_and_coarse_geohash() {
+        let packet = MeshDataPacket::new(999, 1, PAYLOAD_TYPE_CORAL_LEDGER_SETTLEMENT, vec![1, 2, 3, 4]);
+
+        // Bounded bincode roundtrip
+        let bytes = packet.to_bincode_bounded().unwrap();
+        let decoded = MeshDataPacket::from_bincode_bounded(&bytes).unwrap();
+        assert_eq!(packet, decoded);
+
+        // Frame exceeding MAX_NETWORK_FRAME_BYTES is rejected
+        let oversized = vec![0u8; MAX_NETWORK_FRAME_BYTES + 10];
+        assert!(MeshDataPacket::from_bytes(&oversized).is_err());
+        assert!(MeshDataPacket::from_bincode_bounded(&oversized).is_err());
+
+        // Coarse spatial discovery truncates coordinates into privacy-preserving topic
+        let key = CoarseSpatialDiscoveryKey::from_coordinates(35.6586, 139.7454, "tactical_wing");
+        assert_eq!(key.geohash_prefix.len(), 5);
+        let topic = key.to_discovery_topic();
+        assert!(topic.starts_with("kuroshio:discovery:xn7"));
     }
 }

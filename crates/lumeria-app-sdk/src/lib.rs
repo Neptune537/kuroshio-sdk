@@ -246,6 +246,103 @@ pub trait LumeriaApp {
     }
 }
 
+// =========================================================================
+// FFI Panic Boundaries & Poison-Free Synchronized State Management
+// =========================================================================
+
+/// Standard FFI return codes ensuring zero unwinding crashes across C/Wasm/Host ABI boundaries.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfiResultCode {
+    Success = 0,
+    PanicCaught = -1,
+    NullPointer = -2,
+    InvalidPayload = -3,
+    StateChannelOutOfSync = -4,
+}
+
+/// Executes an external FFI guest boundary call wrapped safely in `std::panic::catch_unwind`.
+/// Completely prevents Rust unwinding across the FFI boundary, translating panics into structured error codes.
+pub fn catch_ffi_unwind<F, R>(f: F) -> Result<R, FfiResultCode>
+where
+    F: FnOnce() -> R + std::panic::UnwindSafe,
+{
+    match std::panic::catch_unwind(f) {
+        Ok(res) => Ok(res),
+        Err(_) => Err(FfiResultCode::PanicCaught),
+    }
+}
+
+/// Thread-safe, poison-free state cell using `parking_lot::Mutex`
+/// (eliminating std::sync::Mutex lock poisoning during cross-thread panics or cancellations).
+pub struct PoisonFreeStateCell<T> {
+    inner: parking_lot::Mutex<T>,
+}
+
+impl<T> std::panic::RefUnwindSafe for PoisonFreeStateCell<T> {}
+impl<T> std::panic::UnwindSafe for PoisonFreeStateCell<T> {}
+
+impl<T> PoisonFreeStateCell<T> {
+    pub fn new(val: T) -> Self {
+        Self {
+            inner: parking_lot::Mutex::new(val),
+        }
+    }
+
+    /// Safely mutates the inner state atomically outside of cancelable async await points.
+    pub fn with_lock<R, F: FnOnce(&mut T) -> R>(&self, f: F) -> R {
+        let mut guard = self.inner.lock();
+        f(&mut *guard)
+    }
+
+    /// Reads the inner state with a read lock.
+    pub fn read<R, F: FnOnce(&T) -> R>(&self, f: F) -> R {
+        let guard = self.inner.lock();
+        f(&*guard)
+    }
+}
+
+/// An atomic state channel nonce tracker that prevents async drop desynchronization.
+#[derive(Debug, Default)]
+pub struct AtomicChannelNonceState {
+    pub channel_id: String,
+    pub confirmed_nonce: u64,
+    pub pending_nonce: u64,
+}
+
+impl AtomicChannelNonceState {
+    pub fn new(channel_id: &str, initial_nonce: u64) -> Self {
+        Self {
+            channel_id: channel_id.to_string(),
+            confirmed_nonce: initial_nonce,
+            pending_nonce: initial_nonce,
+        }
+    }
+
+    /// Reserves a strictly increasing nonce before async dispatch.
+    pub fn prepare_next_nonce(&mut self) -> u64 {
+        self.pending_nonce += 1;
+        self.pending_nonce
+    }
+
+    /// Commits the pending nonce only upon verified remote receipt.
+    pub fn commit_nonce(&mut self, nonce: u64) -> Result<(), FfiResultCode> {
+        if nonce == self.pending_nonce {
+            self.confirmed_nonce = nonce;
+            Ok(())
+        } else {
+            // Drop-cancelled or desynced
+            self.pending_nonce = self.confirmed_nonce;
+            Err(FfiResultCode::StateChannelOutOfSync)
+        }
+    }
+
+    /// Rolls back the pending nonce if the future was dropped or cancelled.
+    pub fn rollback_pending(&mut self) {
+        self.pending_nonce = self.confirmed_nonce;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +368,44 @@ mod tests {
         assert!(meter.consume_fuel(4_000).is_ok());
         assert_eq!(meter.remaining_fuel, 6_000);
         assert!(meter.consume_fuel(7_000).is_err());
+    }
+
+    #[test]
+    fn test_catch_ffi_unwind_and_poison_free_state_cell() {
+        // Catch unwind blocks panic from crashing the process
+        let result = catch_ffi_unwind(|| {
+            panic!("Intentional test panic inside guest FFI boundary");
+        });
+        assert_eq!(result, Err(FfiResultCode::PanicCaught));
+
+        // Normal execution succeeds
+        let success = catch_ffi_unwind(|| 42);
+        assert_eq!(success, Ok(42));
+
+        // Poison-free mutex cell survives across panics
+        let cell = PoisonFreeStateCell::new(100);
+        let _ = catch_ffi_unwind(|| {
+            cell.with_lock(|val| {
+                *val += 1;
+                panic!("Panic while holding lock");
+            });
+        });
+        // Cell is NOT poisoned; next lock acquisition succeeds
+        let current_val = cell.read(|val| *val);
+        assert_eq!(current_val, 101);
+
+        // Atomic channel nonce transaction commit and rollback
+        let mut nonce_state = AtomicChannelNonceState::new("ch_async_1", 10);
+        let pending = nonce_state.prepare_next_nonce();
+        assert_eq!(pending, 11);
+        // Async drop simulation -> rollback
+        nonce_state.rollback_pending();
+        assert_eq!(nonce_state.pending_nonce, 10);
+        assert_eq!(nonce_state.confirmed_nonce, 10);
+
+        // Successful commit
+        let next = nonce_state.prepare_next_nonce();
+        assert!(nonce_state.commit_nonce(next).is_ok());
+        assert_eq!(nonce_state.confirmed_nonce, 11);
     }
 }

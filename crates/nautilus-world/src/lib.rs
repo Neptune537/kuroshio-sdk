@@ -742,6 +742,134 @@ impl PlanetaryDemTile {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Deterministic Fixed-Point Spatial Geodesy & Coral Escrow State Validation
+// -----------------------------------------------------------------------------
+
+/// Deterministic 64-bit fixed-point type for cross-architecture consensus (32 integer bits, 32 fractional bits).
+/// Guarantees bit-for-bit identical results on x86_64, ARM64, and Raspberry Pi (Cortex-A72/A76) nodes.
+pub type Fixed64 = fixed::types::I32F32;
+
+/// Deterministic 3D vector in fixed-point representation (millimeter/sub-millimeter precision).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DeterministicVec3Fixed {
+    pub x: Fixed64,
+    pub y: Fixed64,
+    pub z: Fixed64,
+}
+
+impl DeterministicVec3Fixed {
+    pub const fn new(x: Fixed64, y: Fixed64, z: Fixed64) -> Self {
+        Self { x, y, z }
+    }
+
+    pub fn from_f64_dvec3(v: DVec3) -> Self {
+        Self {
+            x: Fixed64::from_num(v.x),
+            y: Fixed64::from_num(v.y),
+            z: Fixed64::from_num(v.z),
+        }
+    }
+
+    pub fn to_dvec3(self) -> DVec3 {
+        DVec3::new(self.x.to_num(), self.y.to_num(), self.z.to_num())
+    }
+
+    /// Squared Euclidean distance using strictly deterministic fixed-point math.
+    pub fn distance_squared(self, other: Self) -> Fixed64 {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        let dz = self.z - other.z;
+        (dx * dx) + (dy * dy) + (dz * dz)
+    }
+
+    /// Integer square root for bit-identical distance without transcendental IEEE 754 float instructions.
+    pub fn distance(self, other: Self) -> Fixed64 {
+        let dist_sq = self.distance_squared(other);
+        if dist_sq <= Fixed64::ZERO {
+            return Fixed64::ZERO;
+        }
+        // I32F32 has 32 fractional bits. For sqrt(x):
+        // if x has 32 fractional bits, sqrt(x * 2^32) has 32 fractional bits.
+        let raw_bits = dist_sq.to_bits() as u128;
+        let sqrt_bits = integer_sqrt_u128(raw_bits << 32) as i64;
+        Fixed64::from_bits(sqrt_bits)
+    }
+
+    /// Bit-canonical 32-byte hash for Coral Escrow match verification.
+    pub fn canonical_hash(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.x.to_bits().to_be_bytes());
+        hasher.update(self.y.to_bits().to_be_bytes());
+        hasher.update(self.z.to_bits().to_be_bytes());
+        hasher.finalize().into()
+    }
+}
+
+/// Helper function computing integer square root floor without hardware float variance.
+pub fn integer_sqrt_u128(n: u128) -> u128 {
+    if n == 0 {
+        return 0;
+    }
+    let mut x0 = 1u128 << ((128 - n.leading_zeros() + 1) / 2);
+    loop {
+        let x1 = (x0 + n / x0) >> 1;
+        if x1 >= x0 {
+            return x0;
+        }
+        x0 = x1;
+    }
+}
+
+/// Deterministic geodetic coordinate representation for state channel proofs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DeterministicWgs84Coord {
+    /// Micro-degrees (1 degree = 1,000,000 units, ~11cm resolution at equator)
+    pub lat_microdeg: i32,
+    /// Micro-degrees (1 degree = 1,000,000 units)
+    pub lon_microdeg: i32,
+    /// Altitude in millimeters
+    pub alt_mm: i64,
+}
+
+impl DeterministicWgs84Coord {
+    pub fn from_geo_coord(coord: Wgs84GeoCoord) -> Self {
+        Self {
+            lat_microdeg: (coord.latitude * 1_000_000.0).round() as i32,
+            lon_microdeg: (coord.longitude * 1_000_000.0).round() as i32,
+            alt_mm: (coord.altitude_meters * 1_000.0).round() as i64,
+        }
+    }
+
+    pub fn to_geo_coord(self) -> Wgs84GeoCoord {
+        Wgs84GeoCoord::new(
+            self.lat_microdeg as f64 / 1_000_000.0,
+            self.lon_microdeg as f64 / 1_000_000.0,
+            self.alt_mm as f64 / 1_000.0,
+        )
+    }
+
+    /// Evaluates if two coordinates are within a deterministic radius threshold (in millimeters).
+    pub fn is_within_radius(self, other: Self, radius_mm: i64) -> bool {
+        let d_lat = (self.lat_microdeg - other.lat_microdeg) as i64 * 111; // ~111mm per microdegree lat
+        let d_lon = (self.lon_microdeg - other.lon_microdeg) as i64 * 111;
+        let d_alt = self.alt_mm - other.alt_mm;
+        let dist_sq = (d_lat * d_lat) + (d_lon * d_lon) + (d_alt * d_alt);
+        dist_sq <= (radius_mm * radius_mm)
+    }
+
+    /// Bit-canonical 32-byte hash for Coral Escrow signing transcript.
+    pub fn canonical_hash(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.lat_microdeg.to_be_bytes());
+        hasher.update(self.lon_microdeg.to_be_bytes());
+        hasher.update(self.alt_mm.to_be_bytes());
+        hasher.finalize().into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,5 +980,29 @@ mod tests {
             Wgs84GeoCoord::try_new_checked(35.0, f64::INFINITY, 10.0),
             Err(GeodeticValidationError::NonFiniteCoordinate("longitude"))
         );
+    }
+
+    #[test]
+    fn test_deterministic_fixed_point_spatial_geodesy_and_hashing() {
+        let coord1 = Wgs84GeoCoord::new(35.6586, 139.7454, 25.0);
+        let det1 = DeterministicWgs84Coord::from_geo_coord(coord1);
+        let coord2 = Wgs84GeoCoord::new(35.6586, 139.7455, 25.0); // ~11 meters away
+        let det2 = DeterministicWgs84Coord::from_geo_coord(coord2);
+
+        // Deterministic radius test (20m radius)
+        assert!(det1.is_within_radius(det2, 20_000));
+        assert!(!det1.is_within_radius(det2, 5_000));
+
+        // Fixed-point vector distances
+        let v1 = DeterministicVec3Fixed::from_f64_dvec3(DVec3::new(100.0, 200.0, 300.0));
+        let v2 = DeterministicVec3Fixed::from_f64_dvec3(DVec3::new(103.0, 204.0, 300.0));
+        let dist = v1.distance(v2);
+        assert_eq!(dist, Fixed64::from_num(5.0));
+
+        // Canonical hash is reproducible across runs
+        let hash1 = det1.canonical_hash();
+        let hash2 = det1.canonical_hash();
+        assert_eq!(hash1, hash2);
+        assert_ne!(hash1, det2.canonical_hash());
     }
 }
