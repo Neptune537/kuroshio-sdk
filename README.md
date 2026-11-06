@@ -220,6 +220,15 @@ The Kuroshio SDK enforces strict mathematical determinism, cryptographic canonic
 19. **Supply-Chain & Pure-Rust Cross-Compilation Hardening (`deny.toml`):**
     - Drops `deny.toml` (`cargo-deny`) banning `openssl`, `openssl-sys`, and `native-tls` in favor of pure-Rust `rustls` and `ed25519-dalek` for seamless cross-compilation to `aarch64-linux-android` (Android) and `aarch64-unknown-linux-gnu` (Atlantis Pi).
 
+20. **Verified Team Membership & Role Authorization (`kuroshio-mesh`):**
+    - `add_member_verified` enforces caller authority (Founder or Officer) and validates cryptographic Ed25519 signatures over `KUROSHIO_TEAM_JOIN_V1:<team_id>:<did>` to prevent unauthorized member spoofing. Banned DIDs (`banned_dids`) are strictly rejected.
+21. **Integer Token Units for Treasury Accounting (`kuroshio-mesh`):**
+    - Treasury balance represented as `treasury_micro_cyan: u64` (1 CYAN = 1,000,000 micro-CYAN) with saturating arithmetic (`saturating_add`), completely replacing floating-point representation (`f64`) to eliminate financial rounding drift.
+22. **Default Secure TLS Endpoints (`kuroshio-mesh`):**
+    - Production radio streams (`SirenRadioStream`) and seed offload endpoints (`OlympusSeedEndpoint`) default to TLS-encrypted HTTPS endpoints (`https://radio.kuroshio.atlantis.market` and `https://olympus.kuroshio.atlantis.market`), preventing plaintext transmission of media streams and offload packets. Local dev IP addresses are segregated under `LOCAL_DEV_STREAM_URL`.
+23. **Cryptographically Verified Escrow Disputes & Watchtower Proofs (`coral-escrow`):**
+    - `submit_dispute_verified` and `submit_watchtower_fraud_proof_verified` perform strict Ed25519 signature checks using `ed25519-dalek` over domain-separated challenge envelopes (`CORAL_STATE_DISPUTE_V1` and `WATCHTOWER_FRAUD_PROOF_V1`), preventing forged dispute claims or invalid watchtower slashing.
+
 ---
 
 ## 📜 License

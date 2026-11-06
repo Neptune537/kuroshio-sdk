@@ -497,6 +497,44 @@ impl DomainSeparatedChannelState {
 
         Ok(())
     }
+
+    /// Verifies the cryptographic Ed25519 signature of the state channel update against the participant's verifying key.
+    /// Completely prevents forged or unauthenticated state transitions.
+    pub fn verify_signature(
+        &self,
+        domain: &CoralDomainSeparator,
+        participant_verifying_key_bytes: &[u8; 32],
+    ) -> Result<(), SecurityError> {
+        use ed25519_dalek::{Signature, VerifyingKey};
+
+        let digest = Self::signing_digest(
+            domain,
+            self.monotonic_nonce,
+            &self.recipient_did,
+            self.recipient_amount_lamports,
+            self.refund_amount_lamports,
+        );
+
+        let sig_bytes: Vec<u8> = (0..self.enclave_signature_hex.len())
+            .step_by(2)
+            .filter_map(|i| u8::from_str_radix(&self.enclave_signature_hex[i..i + 2], 16).ok())
+            .collect();
+
+        let sig_array: [u8; 64] = sig_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| SecurityError::InvalidSignature)?;
+
+        let verifying_key = VerifyingKey::from_bytes(participant_verifying_key_bytes)
+            .map_err(|_| SecurityError::InvalidSignature)?;
+        let signature = Signature::from_bytes(&sig_array);
+
+        verifying_key
+            .verify_strict(&digest, &signature)
+            .map_err(|_| SecurityError::InvalidSignature)?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

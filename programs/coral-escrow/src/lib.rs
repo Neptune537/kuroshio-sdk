@@ -100,6 +100,52 @@ impl CoralChannelAccount {
         })
     }
 
+    /// Submits a signed state channel update during a dispute, verifying the participant's Ed25519 signature
+    /// and initiating the 1-hour challenge timer.
+    pub fn submit_dispute_verified(
+        &mut self,
+        sequence: u64,
+        recipient_amount: u64,
+        now_epoch_sec: u64,
+        signer_verifying_key_bytes: &[u8; 32],
+        signature_bytes: &[u8; 64],
+        chain_id: &str,
+    ) -> Result<(), CoralProgramError> {
+        if sequence <= self.state_sequence {
+            return Err(CoralProgramError::StaleSequence {
+                current: self.state_sequence,
+                proposed: sequence,
+            });
+        }
+
+        // Verify cryptographic Ed25519 signature
+        use ed25519_dalek::{Signature, VerifyingKey};
+        let verifying_key = VerifyingKey::from_bytes(signer_verifying_key_bytes)
+            .map_err(|_| CoralProgramError::UnauthorizedSigner("Invalid public key".into()))?;
+        let signature = Signature::from_bytes(signature_bytes);
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"CORAL_STATE_DISPUTE_V1:");
+        hasher.update(self.channel_id.as_bytes());
+        hasher.update(sequence.to_le_bytes());
+        hasher.update(recipient_amount.to_le_bytes());
+        hasher.update(chain_id.as_bytes());
+        let digest: [u8; 32] = hasher.finalize().into();
+
+        verifying_key
+            .verify_strict(&digest, &signature)
+            .map_err(|_| CoralProgramError::UnauthorizedSigner("Invalid dispute signature".into()))?;
+
+        self.state_sequence = sequence;
+        self.settled_recipient_amount = recipient_amount.min(self.total_deposit_cyan);
+        self.lifecycle = ChannelLifecycleState::Disputed {
+            dispute_opened_epoch_sec: now_epoch_sec,
+            challenge_deadline_epoch_sec: now_epoch_sec + DISPUTE_CHALLENGE_WINDOW_SECONDS,
+        };
+
+        Ok(())
+    }
+
     /// Submits a signed state channel update during a dispute, initiating the 1-hour challenge timer.
     pub fn submit_dispute(
         &mut self,
@@ -226,6 +272,18 @@ impl CoralChannelAccount {
         chain_id: &str,
         now_epoch_sec: u64,
     ) -> Result<u64, CoralProgramError> {
+        self.submit_watchtower_fraud_proof_verified(proof, chain_id, now_epoch_sec, None)
+    }
+
+    /// Processes a Tier 3 Atlantis Watchtower fraud proof with full cryptographic verification.
+    /// Verifies the higher state sequence, expected domain hash, and client counter-signature before slashing.
+    pub fn submit_watchtower_fraud_proof_verified(
+        &mut self,
+        proof: &WatchtowerFraudProof,
+        chain_id: &str,
+        now_epoch_sec: u64,
+        client_verifying_key_bytes: Option<&[u8; 32]>,
+    ) -> Result<u64, CoralProgramError> {
         let expected_domain = self.expected_domain_hash_hex(chain_id);
         if proof.domain_hash_hex != expected_domain {
             return Err(CoralProgramError::DomainSeparatorMismatch {
@@ -239,6 +297,36 @@ impl CoralChannelAccount {
                 current: self.state_sequence,
                 proposed: proof.higher_sequence,
             });
+        }
+
+        // Cryptographic verification of client counter-signature if key is supplied
+        if let Some(key_bytes) = client_verifying_key_bytes {
+            use ed25519_dalek::{Signature, VerifyingKey};
+            let verifying_key = VerifyingKey::from_bytes(key_bytes)
+                .map_err(|_| CoralProgramError::UnauthorizedSigner("Invalid client public key".into()))?;
+
+            let sig_bytes: Vec<u8> = (0..proof.client_countersignature_hex.len())
+                .step_by(2)
+                .filter_map(|i| u8::from_str_radix(&proof.client_countersignature_hex[i..i + 2], 16).ok())
+                .collect();
+
+            let sig_array: [u8; 64] = sig_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| CoralProgramError::UnauthorizedSigner("Invalid signature length".into()))?;
+
+            let mut hasher = Sha256::new();
+            hasher.update(b"WATCHTOWER_FRAUD_PROOF_V1:");
+            hasher.update(proof.channel_id.as_bytes());
+            hasher.update(proof.higher_sequence.to_le_bytes());
+            hasher.update(proof.rightful_recipient_amount.to_le_bytes());
+            hasher.update(chain_id.as_bytes());
+            let digest: [u8; 32] = hasher.finalize().into();
+
+            let signature = Signature::from_bytes(&sig_array);
+            verifying_key
+                .verify_strict(&digest, &signature)
+                .map_err(|_| CoralProgramError::UnauthorizedSigner("Fraud proof signature forgery rejected".into()))?;
         }
 
         // Penalize stale state submission: slash 10% of remaining depositor refund into recipient settlement

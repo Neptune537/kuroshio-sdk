@@ -70,6 +70,7 @@ name = "coral-escrow"
 version = "0.1.0"
 dependencies = [
  "bcs",
+ "ed25519-dalek",
  "serde",
  "serde_json",
  "sha2",

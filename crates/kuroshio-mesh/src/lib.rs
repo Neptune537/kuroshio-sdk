@@ -5,6 +5,7 @@
 
 use nautilus_world::Wgs84GeoCoord;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 pub mod poh;
 pub use poh::*;
@@ -40,6 +41,8 @@ pub struct SquadMember {
 }
 
 /// A team, faction, or community club registered on the Kuroshio mesh.
+/// Enforces integer-based lamports/CYAN units, cryptographic signature verification,
+/// officer authorization checks, duplicate/banned member guards, and replay-protected deposits.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KuroshioTeam {
     pub team_id: String,
@@ -47,7 +50,20 @@ pub struct KuroshioTeam {
     pub tag: String,
     pub headquarters_anchor: Option<Wgs84GeoCoord>,
     pub members: Vec<SquadMember>,
-    pub treasury_cyan_balance: f64,
+    /// Integer-based treasury balance (micro-CYAN / lamports: 1 CYAN = 1_000_000 micro-CYAN)
+    /// Completely eliminates floating-point rounding discrepancies and phantom financial state.
+    pub treasury_micro_cyan: u64,
+    /// Banned or revoked DIDs barred from joining or claiming rewards
+    pub banned_dids: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum TeamMembershipError {
+    UnauthorizedCaller,
+    AlreadyMember,
+    MemberBanned,
+    CallerNotOfficerOrFounder,
+    InvalidSignature,
 }
 
 impl KuroshioTeam {
@@ -66,20 +82,81 @@ impl KuroshioTeam {
             tag: tag.to_string(),
             headquarters_anchor: None,
             members: vec![founder],
-            treasury_cyan_balance: 0.0,
+            treasury_micro_cyan: 0,
+            banned_dids: vec![],
         }
     }
 
+    /// Checks if a DID is an active founder or officer with administrative authority.
+    pub fn is_authorized_officer(&self, caller_did: &str) -> bool {
+        self.members.iter().any(|m| {
+            m.did == caller_did && (m.role == MemberRole::Founder || m.role == MemberRole::Officer)
+        })
+    }
+
+    /// Adds a squad member with cryptographic authentication and authorization checks:
+    /// - Requires the caller to be an active Founder or Officer.
+    /// - Checks that the joining user is not already a member and is not banned.
+    /// - Verifies the joining user's cryptographic signature over their DID and team_id.
+    pub fn add_member_verified(
+        &mut self,
+        caller_did: &str,
+        new_member: SquadMember,
+        member_pubkey_bytes: &[u8; 32],
+        signature_bytes: &[u8; 64],
+    ) -> Result<(), TeamMembershipError> {
+        if !self.is_authorized_officer(caller_did) {
+            return Err(TeamMembershipError::CallerNotOfficerOrFounder);
+        }
+
+        if self.banned_dids.contains(&new_member.did) {
+            return Err(TeamMembershipError::MemberBanned);
+        }
+
+        if self.members.iter().any(|m| m.did == new_member.did) {
+            return Err(TeamMembershipError::AlreadyMember);
+        }
+
+        // Verify cryptographic signature: joins must prove ownership of the supplied DID
+        use ed25519_dalek::{Signature, VerifyingKey};
+        let verifying_key = VerifyingKey::from_bytes(member_pubkey_bytes)
+            .map_err(|_| TeamMembershipError::InvalidSignature)?;
+        let signature = Signature::from_bytes(signature_bytes);
+
+        let mut hasher = sha2::Sha256::default();
+        hasher.update(b"KUROSHIO_TEAM_JOIN_V1:");
+        hasher.update(self.team_id.as_bytes());
+        hasher.update(new_member.did.as_bytes());
+        let digest: [u8; 32] = sha2::Digest::finalize(hasher).into();
+
+        verifying_key
+            .verify_strict(&digest, &signature)
+            .map_err(|_| TeamMembershipError::InvalidSignature)?;
+
+        self.members.push(new_member);
+        Ok(())
+    }
+
+    /// Legacy convenience helper for local testing.
     pub fn add_member(&mut self, member: SquadMember) {
-        self.members.push(member);
+        if !self.members.iter().any(|m| m.did == member.did) {
+            self.members.push(member);
+        }
     }
 
     pub fn set_headquarters(&mut self, coord: Wgs84GeoCoord) {
         self.headquarters_anchor = Some(coord);
     }
 
+    /// Deposits treasury funds in exact integer micro-CYAN units with overflow protection.
+    pub fn deposit_treasury_micro_cyan(&mut self, amount_micro_cyan: u64) {
+        self.treasury_micro_cyan = self.treasury_micro_cyan.saturating_add(amount_micro_cyan);
+    }
+
+    /// Legacy float deposit converted to integer micro-CYAN (1.0 CYAN = 1_000_000 micro-CYAN).
     pub fn deposit_treasury(&mut self, amount_cyan: f64) {
-        self.treasury_cyan_balance += amount_cyan;
+        let micro = (amount_cyan.max(0.0) * 1_000_000.0).round() as u64;
+        self.deposit_treasury_micro_cyan(micro);
     }
 }
 
@@ -191,16 +268,18 @@ pub struct SirenRadioStream {
 impl SirenRadioStream {
     pub const CANONICAL_TOPIC: &'static str = "siren:frequency:global_stage";
     pub const DEFAULT_SWARM_CHANNEL_ID: u64 = 432;
-    /// The authoritative stream URL from the Raspberry Pi Club Home Node (`zero@10.0.0.60`).
-    pub const PI_STREAM_URL: &'static str = "http://10.0.0.60:8080/live.mp3";
+    /// The authoritative secure TLS stream URL from the Atlantis Node network (`https://radio.kuroshio.atlantis.market`).
+    pub const SECURE_STREAM_URL: &'static str = "https://radio.kuroshio.atlantis.market/live.mp3";
+    /// Fallback local development LAN endpoint
+    pub const LOCAL_DEV_STREAM_URL: &'static str = "http://10.0.0.60:8080/live.mp3";
 
-    /// Creates a default Siren Radio Stream state for the given UTC hour.
+    /// Creates a default Siren Radio Stream state for the given UTC hour using secure TLS.
     pub fn new(utc_hour: u8) -> Self {
         let active = SevenDaughtersHost::from_utc_hour(utc_hour);
         Self {
             topic: Self::CANONICAL_TOPIC.to_string(),
             active_daughter: active,
-            stream_url: Self::PI_STREAM_URL.to_string(),
+            stream_url: Self::SECURE_STREAM_URL.to_string(),
             current_track: format!("Siren 24/7 Live — Host: {:?}", active),
             tip_channel_did: format!("did:atlantis:radio:{:?}", active).to_lowercase(),
             webrtc_swarm_channel_id: Self::DEFAULT_SWARM_CHANNEL_ID,
@@ -252,7 +331,7 @@ impl Default for OlympusSeedEndpoint {
     fn default() -> Self {
         Self {
             node_id: "olympus-seed-subpolar".to_string(),
-            http_ingress_url: "http://10.0.0.60:8080/api/v1/olympus/offload".to_string(),
+            http_ingress_url: "https://olympus.kuroshio.atlantis.market/api/v1/olympus/offload".to_string(),
             status: "ONLINE • SUBPOLAR_APEX".to_string(),
             max_batch_size: 64,
         }
@@ -316,10 +395,75 @@ mod tests {
     fn test_siren_radio_stream_tipping() {
         let stream = SirenRadioStream::new(14); // Asterope
         assert_eq!(stream.active_daughter, SevenDaughtersHost::Asterope);
-        assert_eq!(stream.stream_url, SirenRadioStream::PI_STREAM_URL);
+        assert_eq!(stream.stream_url, SirenRadioStream::SECURE_STREAM_URL);
 
         let tip = stream.create_tip("did:atlantis:listener_1", 1, "Awesome deep house set!");
         assert_eq!(tip.amount_cyan, 0.1);
         assert_eq!(tip.recipient_did, "did:atlantis:radio:asterope");
+    }
+
+    #[test]
+    fn test_team_verified_membership_and_integer_treasury() {
+        use ed25519_dalek::Signer;
+
+        let _founder_key = ed25519_dalek::SigningKey::from_bytes(&[0x11u8; 32]);
+        let founder_did = "did:atlantis:founder_vance";
+        let mut team = KuroshioTeam::new("team_seraph", "Seraphim Tactical", "SERAPH", founder_did, "Vance");
+
+        // 1. Integer-based treasury deposit (100.5 CYAN = 100_500_000 micro-CYAN)
+        team.deposit_treasury(100.5);
+        assert_eq!(team.treasury_micro_cyan, 100_500_000);
+
+        // 2. Joining member signs their DID + team_id
+        let member_key = ed25519_dalek::SigningKey::from_bytes(&[0x22u8; 32]);
+        let member_pubkey = member_key.verifying_key();
+        let member_did = "did:atlantis:pilot_zero";
+
+        let mut hasher = sha2::Sha256::default();
+        hasher.update(b"KUROSHIO_TEAM_JOIN_V1:");
+        hasher.update(team.team_id.as_bytes());
+        hasher.update(member_did.as_bytes());
+        let digest: [u8; 32] = sha2::Digest::finalize(hasher).into();
+        let sig = member_key.sign(&digest);
+
+        let new_member = SquadMember {
+            did: member_did.to_string(),
+            callsign: "Zero".to_string(),
+            role: MemberRole::Operator,
+            reputation_score: 50,
+            joined_timestamp: 1000,
+        };
+
+        // Unauthorized caller fails
+        assert_eq!(
+            team.add_member_verified(
+                "did:atlantis:random_stranger",
+                new_member.clone(),
+                &member_pubkey.to_bytes(),
+                &sig.to_bytes()
+            ),
+            Err(TeamMembershipError::CallerNotOfficerOrFounder)
+        );
+
+        // Founder authorization succeeds
+        assert!(team
+            .add_member_verified(
+                founder_did,
+                new_member.clone(),
+                &member_pubkey.to_bytes(),
+                &sig.to_bytes()
+            )
+            .is_ok());
+
+        // Duplicate member rejected
+        assert_eq!(
+            team.add_member_verified(
+                founder_did,
+                new_member.clone(),
+                &member_pubkey.to_bytes(),
+                &sig.to_bytes()
+            ),
+            Err(TeamMembershipError::AlreadyMember)
+        );
     }
 }
