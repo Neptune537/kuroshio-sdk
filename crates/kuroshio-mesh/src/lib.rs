@@ -12,8 +12,13 @@ pub use poh::*;
 pub mod zk_geo;
 pub use zk_geo::*;
 
+#[cfg(feature = "mesh-transport")]
 pub mod transport;
+#[cfg(feature = "mesh-transport")]
 pub use transport::*;
+
+pub mod security;
+pub use security::*;
 
 /// Role within a Kuroshio squad or club.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +208,7 @@ impl SirenRadioStream {
     }
 
     /// Encapsulates a 48kHz Opus audio frame into a P2P WebRTC `MeshDataPacket` for squad swarm relay.
+    #[cfg(feature = "mesh-transport")]
     pub fn build_swarm_audio_packet(
         &self,
         sequence: u64,

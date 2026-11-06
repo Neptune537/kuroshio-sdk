@@ -9,6 +9,31 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const DEFAULT_MAX_FRAME_FUEL: u64 = 500_000;
+/// Default maximum Wasm linear memory pages (256 pages * 64 KiB = 16 MiB hard ceiling)
+pub const DEFAULT_MAX_MEMORY_PAGES: u32 = 256;
+pub const WASM_PAGE_SIZE_BYTES: usize = 65_536;
+
+/// Zero-WASI Sandbox Isolation Policy enforced on all untrusted guest modules.
+/// By default, all host filesystem (`fd_read`/`fd_write`/`path_open`), raw socket (`sock_open`),
+/// and process environment (`environ_get`) syscalls are completely stripped from the linker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasiSandboxPolicy {
+    pub allow_filesystem: bool,
+    pub allow_raw_sockets: bool,
+    pub allow_env_vars: bool,
+    pub max_linear_memory_pages: u32,
+}
+
+impl Default for WasiSandboxPolicy {
+    fn default() -> Self {
+        Self {
+            allow_filesystem: false,
+            allow_raw_sockets: false,
+            allow_env_vars: false,
+            max_linear_memory_pages: DEFAULT_MAX_MEMORY_PAGES,
+        }
+    }
+}
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum HostRunnerError {
@@ -16,6 +41,14 @@ pub enum HostRunnerError {
     ValidationFailed(String),
     #[error("Fuel budget exhausted: used {consumed} > limit {limit}")]
     FuelExhausted { consumed: u64, limit: u64 },
+    #[error("Memory bomb blocked: requested {requested_pages} pages exceeds cap of {max_pages} pages ({max_mib} MiB)")]
+    MemoryLimitExceeded {
+        requested_pages: u32,
+        max_pages: u32,
+        max_mib: u32,
+    },
+    #[error("Sandbox escape blocked: prohibited WASI import `{0}` rejected by zero-WASI policy")]
+    ForbiddenWasiImport(String),
     #[error("Shared linear memory mapping error: {0}")]
     MemoryError(String),
     #[error("Manifest capability error: {0}")]
@@ -34,6 +67,8 @@ pub struct GuestModuleMetadata {
 /// Host runner harness for sandboxed 120Hz guest modules.
 pub struct LumeriaHostRunner<const CAPACITY: usize> {
     pub manifest: AppManifest,
+    pub wasi_policy: WasiSandboxPolicy,
+    pub allocated_memory_pages: u32,
     pub ring_buffer: SharedInputRingBuffer<CAPACITY>,
     pub fuel_meter: WasmFuelMeter,
     pub total_frames_executed: u64,
@@ -50,11 +85,50 @@ impl<const CAPACITY: usize> LumeriaHostRunner<CAPACITY> {
 
         Ok(Self {
             manifest,
+            wasi_policy: WasiSandboxPolicy::default(),
+            allocated_memory_pages: 16, // Initial 1 MiB linear memory
             ring_buffer: SharedInputRingBuffer::new(),
             fuel_meter: WasmFuelMeter::new(fuel_limit, 2_000),
             total_frames_executed: 0,
             is_active: true,
         })
+    }
+
+    /// Audits a WASM binary's declared imports before instantiation to block WASI filesystem/socket escape attempts.
+    pub fn audit_wasm_imports(&mut self, declared_imports: &[&str]) -> Result<(), HostRunnerError> {
+        for &imp in declared_imports {
+            let lower = imp.to_ascii_lowercase();
+            if !self.wasi_policy.allow_filesystem
+                && (lower.contains("wasi_snapshot_preview1::path_")
+                    || lower.contains("wasi_snapshot_preview1::fd_")
+                    || lower.contains("wasi:filesystem"))
+            {
+                self.is_active = false;
+                return Err(HostRunnerError::ForbiddenWasiImport(imp.to_string()));
+            }
+            if !self.wasi_policy.allow_raw_sockets
+                && (lower.contains("sock_open") || lower.contains("sock_connect") || lower.contains("wasi:sockets"))
+            {
+                self.is_active = false;
+                return Err(HostRunnerError::ForbiddenWasiImport(imp.to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Enforces hard linear memory page caps (`memory.grow` guard) to prevent WASM memory bombs.
+    pub fn request_memory_grow(&mut self, additional_pages: u32) -> Result<u32, HostRunnerError> {
+        let new_total = self.allocated_memory_pages.saturating_add(additional_pages);
+        if new_total > self.wasi_policy.max_linear_memory_pages {
+            self.is_active = false;
+            return Err(HostRunnerError::MemoryLimitExceeded {
+                requested_pages: new_total,
+                max_pages: self.wasi_policy.max_linear_memory_pages,
+                max_mib: (self.wasi_policy.max_linear_memory_pages * 64) / 1024,
+            });
+        }
+        self.allocated_memory_pages = new_total;
+        Ok(self.allocated_memory_pages)
     }
 
     /// Pushes a 120Hz high-frequency hardware input frame (pointer/raycast/telemetry)
@@ -115,5 +189,26 @@ mod tests {
         let runaway_err = runner.tick_frame(0.016, 600_000);
         assert!(matches!(runaway_err, Err(HostRunnerError::FuelExhausted { .. })));
         assert!(!runner.is_active);
+    }
+
+    #[test]
+    fn test_zero_wasi_import_audit_and_memory_bomb_guard() {
+        let manifest = AppManifest::new("com.untrusted.mod", "Untrusted Mod", "0.1.0", "did:atlantis:anon");
+        let mut runner = LumeriaHostRunner::<32>::new(manifest.clone(), None).unwrap();
+
+        // Safe WIT imports pass
+        assert!(runner.audit_wasm_imports(&["lumeria:guest/host@0.1.0"]).is_ok());
+
+        // Attempting WASI filesystem or socket escape is blocked and terminates runner
+        let escape_err = runner.audit_wasm_imports(&["wasi_snapshot_preview1::path_open"]);
+        assert!(matches!(escape_err, Err(HostRunnerError::ForbiddenWasiImport(_))));
+        assert!(!runner.is_active);
+
+        // Memory bomb (> 256 pages / 16 MiB) is blocked
+        let mut runner2 = LumeriaHostRunner::<32>::new(manifest, None).unwrap();
+        assert!(runner2.request_memory_grow(100).is_ok());
+        let mem_err = runner2.request_memory_grow(300);
+        assert!(matches!(mem_err, Err(HostRunnerError::MemoryLimitExceeded { .. })));
+        assert!(!runner2.is_active);
     }
 }

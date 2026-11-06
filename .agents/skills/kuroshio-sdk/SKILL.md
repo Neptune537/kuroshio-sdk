@@ -231,7 +231,25 @@ When authoring or auditing Tier 2 mobile and desktop client applications:
 
 ---
 
-## 7. Key Rules for Agents
+## 7. Security Hardening Primitives (6-Vector Lockdown)
+
+1. **Hardware Enclave Key Vault & `zeroize` (`kuroshio_mesh::security`)**:
+   - Implement `HardwareKeyVault` (`AndroidKeystoreStrongBox`, `AppleSecureEnclave`, `LinuxTpm2`, `WindowsDpapi`) so private keys never enter raw Rust heap memory.
+   - Wrap ephemeral session secrets in `EphemeralSessionSecret` (`ZeroizeOnDrop`).
+2. **Domain-Separated Coral State Channels & Watchtowers (`coral_escrow` & `kuroshio_mesh::security`)**:
+   - Bind every off-chain state update to `CoralDomainSeparator` (`chain_id`, `network_name`, `verifying_program_id`, `match_channel_id`) and enforce strictly monotonic nonces via `DomainSeparatedChannelState::verify_monotonic_transition`.
+   - Use `submit_watchtower_fraud_proof` on Tier 3 Atlantis Watchtowers to penalize stale state broadcasts and slash 10% (`WATCHTOWER_SLASH_BPS = 1000`) of a cheater's escrow deposit.
+3. **Noise/TLS 1.3 DID Binding, Mobile Handoff Tokens & GossipSub Anti-Eclipse (`kuroshio_mesh::transport`)**:
+   - Issue and verify `HandoffResumptionToken` (HMAC-SHA256 bound to PeerID, DID, and monotonic `handoff_generation`) during Wi-Fi to 5G handoffs.
+   - Enforce `GossipSubPeerScorer` (quadratic invalid message penalty, per-minute topic rate limits, and `/24` IPv4 subnet anti-eclipse limits).
+4. **Zero-WASI Capability Sandbox & Memory Caps (`lumeria_host_runner`)**:
+   - Audit guest modules with `WasiSandboxPolicy::strict_zero_wasi()` (`audit_wasm_imports`) to block `wasi_snapshot_preview1` filesystem/socket imports, enforce 500k per-frame instruction fuel limits, and cap linear memory at 256 pages (`16 MiB`) via `request_memory_grow()`.
+5. **Olympus Tier Boundary Isolation (`olympus-core` Feature & `deny.toml`)**:
+   - Compile Olympus targets with `--no-default-features --features olympus-core` and validate with `cargo-deny` (`deny.toml`) so Tier 2/3 networking dependencies never enter Tier 1.
+6. **Geodetic Deserialization Sanitization (`nautilus_world`)**:
+   - All `Wgs84GeoCoord`, `KinematicStateVector`, and `AnchoredSpatialOverlay` payloads enforce custom Serde deserializers rejecting `NaN`, `Infinity`, and out-of-bounds geodetic coordinates at the deserialization boundary.
+
+## 8. Key Rules for Agents
 1. **Zero Raw GPS Broadcasting**: Always enforce `LocationCoarse` or `ZK-Geo` coarse hashes. High-precision GPS is vaulted in the Club Home Node.
 2. **Dual-Precision Geodesy**: Keep world-space coordinates in 64-bit `DVec3`/`f64` ECEF; downscale to camera-relative 32-bit `Vec3`/`f32` in tangent frames before passing to shaders.
 3. **Pure Rust / Wasm**: Maintain pure Rust compatibility (`wasm32-unknown-unknown` friendly, zero non-standard C dependencies).

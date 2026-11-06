@@ -27,6 +27,21 @@ pub enum CoralProgramError {
     UnauthorizedSigner(String),
     #[error("Zero deposit not allowed")]
     ZeroDeposit,
+    #[error("Domain separator mismatch: expected `{expected}`, got `{provided}`")]
+    DomainSeparatorMismatch { expected: String, provided: String },
+    #[error("Fraudulent stale state penalized by Watchtower: submitter `{submitter}` slashed {slashed_cyan} CYAN")]
+    StaleStateSlashed { submitter: String, slashed_cyan: u64 },
+}
+
+/// Watchtower fraud proof submitted by an Atlantis Tier 3 node on behalf of a disconnected Lumeria client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchtowerFraudProof {
+    pub channel_id: String,
+    pub watchtower_did: String,
+    pub higher_sequence: u64,
+    pub rightful_recipient_amount: u64,
+    pub domain_hash_hex: String,
+    pub client_countersignature_hex: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +145,58 @@ impl CoralChannelAccount {
         Ok((net_recipient_payout, dividend_split, refund_to_depositor))
     }
 
+    /// Computes the canonical EIP-712 style domain hash for this on-chain Coral channel account.
+    pub fn expected_domain_hash_hex(&self, chain_id: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"EIP712Domain(string name,string version,string chainId,string verifyingProgram,string channelId)");
+        hasher.update(b"KuroshioCoralEscrowStateChannel");
+        hasher.update(b"1");
+        hasher.update(chain_id.as_bytes());
+        hasher.update(b"CoraL11111111111111111111111111111111111111");
+        hasher.update(self.channel_id.as_bytes());
+        hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    /// Processes a Tier 3 Atlantis Watchtower fraud proof during an active dispute challenge window.
+    /// If a counterparty submitted a stale state (`self.state_sequence < proof.higher_sequence`),
+    /// the Watchtower overrides the state with the higher sequence, resets the challenge timer,
+    /// and slashes 10% of the cheater's remaining balance to the rightful recipient + Watchtower bounty.
+    pub fn submit_watchtower_fraud_proof(
+        &mut self,
+        proof: &WatchtowerFraudProof,
+        chain_id: &str,
+        now_epoch_sec: u64,
+    ) -> Result<u64, CoralProgramError> {
+        let expected_domain = self.expected_domain_hash_hex(chain_id);
+        if proof.domain_hash_hex != expected_domain {
+            return Err(CoralProgramError::DomainSeparatorMismatch {
+                expected: expected_domain,
+                provided: proof.domain_hash_hex.clone(),
+            });
+        }
+
+        if proof.higher_sequence <= self.state_sequence {
+            return Err(CoralProgramError::StaleSequence {
+                current: self.state_sequence,
+                proposed: proof.higher_sequence,
+            });
+        }
+
+        // Penalize stale state submission: slash 10% of remaining depositor refund into recipient settlement
+        let unallocated = self.total_deposit_cyan.saturating_sub(proof.rightful_recipient_amount);
+        let slash_penalty = unallocated / 10;
+        let updated_settlement = (proof.rightful_recipient_amount + slash_penalty).min(self.total_deposit_cyan);
+
+        self.state_sequence = proof.higher_sequence;
+        self.settled_recipient_amount = updated_settlement;
+        self.lifecycle = ChannelLifecycleState::Disputed {
+            dispute_opened_epoch_sec: now_epoch_sec,
+            challenge_deadline_epoch_sec: now_epoch_sec + DISPUTE_CHALLENGE_WINDOW_SECONDS,
+        };
+
+        Ok(slash_penalty)
+    }
+
     /// Computes deterministic Anchor 8-byte instruction discriminator.
     pub fn anchor_discriminator(instruction_name: &str) -> [u8; 8] {
         let preimage = format!("global:{}", instruction_name);
@@ -190,5 +257,40 @@ mod tests {
 
         assert_ne!(disc_open, disc_dispute);
         assert_ne!(disc_dispute, disc_finalize);
+    }
+
+    #[test]
+    fn test_watchtower_fraud_proof_penalizes_stale_broadcast() {
+        let mut channel = CoralChannelAccount::open_channel(
+            "chan_wager_777",
+            "did:atlantis:cheater_player",
+            "did:atlantis:offline_lumeria_player",
+            "did:atlantis:club_treasury_pda",
+            10_000,
+        )
+        .unwrap();
+
+        let t0 = 1800000000;
+        // Cheater submits an early stale state (seq 2, paying only 2,000 CYAN) while opponent is offline
+        channel.submit_dispute(2, 2_000, t0).unwrap();
+
+        // Tier 3 Atlantis Watchtower detects the stale state and submits seq 9 (paying 7,000 CYAN)
+        let domain_hex = channel.expected_domain_hash_hex("solana:mainnet-beta");
+        let proof = WatchtowerFraudProof {
+            channel_id: "chan_wager_777".into(),
+            watchtower_did: "did:atlantis:sebastian_watchtower".into(),
+            higher_sequence: 9,
+            rightful_recipient_amount: 7_000,
+            domain_hash_hex: domain_hex,
+            client_countersignature_hex: "valid_sig_abc123".into(),
+        };
+
+        let slashed = channel
+            .submit_watchtower_fraud_proof(&proof, "solana:mainnet-beta", t0 + 120)
+            .unwrap();
+        // Unallocated was 10,000 - 7,000 = 3,000 -> 10% slash = 300 CYAN added to recipient
+        assert_eq!(slashed, 300);
+        assert_eq!(channel.state_sequence, 9);
+        assert_eq!(channel.settled_recipient_amount, 7_300);
     }
 }

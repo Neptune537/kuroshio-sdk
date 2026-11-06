@@ -40,22 +40,172 @@ pub const GAME_FIELD_ALTITUDE_THRESHOLD_METERS: f64 = 500.0;
 pub const KARMAN_LINE_ORBIT_METERS: f64 = 80_000.0;
 /// Earth sidereal angular velocity ($\text{rad/s}$) around the ECEF Z-axis.
 pub const EARTH_ANGULAR_VELOCITY_RAD_S: f64 = 7.292_115_9e-5;
+/// Minimum allowed geodetic altitude (-15km, below Mariana Trench).
+pub const MIN_VALID_ALTITUDE_METERS: f64 = -15_000.0;
+/// Maximum allowed geodetic altitude (50,000km, above GEO orbit).
+pub const MAX_VALID_ALTITUDE_METERS: f64 = 50_000_000.0;
+/// Maximum allowed ECEF coordinate magnitude (60,000km).
+pub const MAX_VALID_ECEF_MAGNITUDE_METERS: f64 = 60_000_000.0;
+/// Maximum allowed ECEF velocity magnitude (30km/s).
+pub const MAX_VALID_VELOCITY_M_S: f64 = 30_000.0;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeodeticValidationError {
+    NonFiniteCoordinate(&'static str),
+    LatitudeOutOfBounds(String),
+    LongitudeOutOfBounds(String),
+    AltitudeOutOfBounds(String),
+    RadiusOutOfBounds(String),
+    EcefMagnitudeOutOfBounds(String),
+}
+
+impl std::fmt::Display for GeodeticValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonFiniteCoordinate(field) => write!(f, "Non-finite float (NaN or Infinity) in {}", field),
+            Self::LatitudeOutOfBounds(v) => write!(f, "Latitude out of bounds [-90, 90]: {}", v),
+            Self::LongitudeOutOfBounds(v) => write!(f, "Longitude out of bounds [-180, 180]: {}", v),
+            Self::AltitudeOutOfBounds(v) => write!(f, "Altitude out of bounds [-15km, 50,000km]: {}", v),
+            Self::RadiusOutOfBounds(v) => write!(f, "Bounding radius out of bounds (0, 20,000km]: {}", v),
+            Self::EcefMagnitudeOutOfBounds(v) => write!(f, "ECEF vector or velocity out of bounds: {}", v),
+        }
+    }
+}
+
+impl std::error::Error for GeodeticValidationError {}
+
+fn deserialize_latitude<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val = f64::deserialize(deserializer)?;
+    if !val.is_finite() {
+        return Err(serde::de::Error::custom("latitude must be finite (no NaN or Infinity)"));
+    }
+    if !(-90.0..=90.0).contains(&val) {
+        return Err(serde::de::Error::custom(format!("latitude {} out of bounds [-90.0, 90.0]", val)));
+    }
+    Ok(val)
+}
+
+fn deserialize_longitude<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val = f64::deserialize(deserializer)?;
+    if !val.is_finite() {
+        return Err(serde::de::Error::custom("longitude must be finite (no NaN or Infinity)"));
+    }
+    if !(-180.0..=180.0).contains(&val) {
+        return Err(serde::de::Error::custom(format!("longitude {} out of bounds [-180.0, 180.0]", val)));
+    }
+    Ok(val)
+}
+
+fn deserialize_altitude<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val = f64::deserialize(deserializer)?;
+    if !val.is_finite() {
+        return Err(serde::de::Error::custom("altitude_meters must be finite (no NaN or Infinity)"));
+    }
+    if !(MIN_VALID_ALTITUDE_METERS..=MAX_VALID_ALTITUDE_METERS).contains(&val) {
+        return Err(serde::de::Error::custom(format!(
+            "altitude_meters {} out of bounds [{}, {}]",
+            val, MIN_VALID_ALTITUDE_METERS, MAX_VALID_ALTITUDE_METERS
+        )));
+    }
+    Ok(val)
+}
+
+fn deserialize_radius<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val = f64::deserialize(deserializer)?;
+    if !val.is_finite() || val <= 0.0 || val > 20_000_000.0 {
+        return Err(serde::de::Error::custom("bounding_radius_meters must be finite and within (0.0, 20,000,000.0]"));
+    }
+    Ok(val)
+}
+
+fn deserialize_ecef_pos<'de, D>(deserializer: D) -> Result<DVec3, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = DVec3::deserialize(deserializer)?;
+    if !v.is_finite() || v.length() > MAX_VALID_ECEF_MAGNITUDE_METERS {
+        return Err(serde::de::Error::custom("position_ecef must be finite and within valid orbital bounds"));
+    }
+    Ok(v)
+}
+
+fn deserialize_ecef_vel<'de, D>(deserializer: D) -> Result<DVec3, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = DVec3::deserialize(deserializer)?;
+    if !v.is_finite() || v.length() > MAX_VALID_VELOCITY_M_S {
+        return Err(serde::de::Error::custom("velocity_ecef must be finite and <= 30,000 m/s"));
+    }
+    Ok(v)
+}
 
 /// Geodetic position on the WGS84 ellipsoid.
+/// Enforces strict Serde deserialization validators to block NaN, Infinity, or out-of-bounds coordinate spoofing.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Wgs84GeoCoord {
+    #[serde(deserialize_with = "deserialize_latitude")]
     pub latitude: f64,
+    #[serde(deserialize_with = "deserialize_longitude")]
     pub longitude: f64,
+    #[serde(deserialize_with = "deserialize_altitude")]
     pub altitude_meters: f64,
 }
 
 impl Wgs84GeoCoord {
+    /// Creates a new `Wgs84GeoCoord`, clamping finite values to valid geodetic bounds and replacing NaN with 0.0.
     pub fn new(latitude: f64, longitude: f64, altitude_meters: f64) -> Self {
+        let lat = if latitude.is_finite() { latitude.clamp(-90.0, 90.0) } else { 0.0 };
+        let lon = if longitude.is_finite() { longitude.clamp(-180.0, 180.0) } else { 0.0 };
+        let alt = if altitude_meters.is_finite() {
+            altitude_meters.clamp(MIN_VALID_ALTITUDE_METERS, MAX_VALID_ALTITUDE_METERS)
+        } else {
+            0.0
+        };
         Self {
+            latitude: lat,
+            longitude: lon,
+            altitude_meters: alt,
+        }
+    }
+
+    /// Strictly validates raw geodetic inputs without clamping, returning `Err` on NaN, Infinity, or out-of-bounds coordinates.
+    pub fn try_new_checked(latitude: f64, longitude: f64, altitude_meters: f64) -> Result<Self, GeodeticValidationError> {
+        if !latitude.is_finite() {
+            return Err(GeodeticValidationError::NonFiniteCoordinate("latitude"));
+        }
+        if !longitude.is_finite() {
+            return Err(GeodeticValidationError::NonFiniteCoordinate("longitude"));
+        }
+        if !altitude_meters.is_finite() {
+            return Err(GeodeticValidationError::NonFiniteCoordinate("altitude_meters"));
+        }
+        if !(-90.0..=90.0).contains(&latitude) {
+            return Err(GeodeticValidationError::LatitudeOutOfBounds(latitude.to_string()));
+        }
+        if !(-180.0..=180.0).contains(&longitude) {
+            return Err(GeodeticValidationError::LongitudeOutOfBounds(longitude.to_string()));
+        }
+        if !(MIN_VALID_ALTITUDE_METERS..=MAX_VALID_ALTITUDE_METERS).contains(&altitude_meters) {
+            return Err(GeodeticValidationError::AltitudeOutOfBounds(altitude_meters.to_string()));
+        }
+        Ok(Self {
             latitude,
             longitude,
             altitude_meters,
-        }
+        })
     }
 
     /// Computes the EGM96 / EGM2008 geoid undulation $N(\phi, \lambda)$ in meters
@@ -145,8 +295,10 @@ pub fn egm2008_geoid_undulation_meters(latitude_deg: f64, longitude_deg: f64) ->
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct KinematicStateVector {
     /// 64-bit ECEF position in meters
+    #[serde(deserialize_with = "deserialize_ecef_pos")]
     pub position_ecef: DVec3,
     /// 64-bit ECEF velocity in meters per second ($\text{m/s}$)
+    #[serde(deserialize_with = "deserialize_ecef_vel")]
     pub velocity_ecef: DVec3,
 }
 
@@ -279,6 +431,7 @@ pub struct AnchoredSpatialOverlay {
     pub overlay_id: String,
     pub name: String,
     pub origin: Wgs84GeoCoord,
+    #[serde(deserialize_with = "deserialize_radius")]
     pub bounding_radius_meters: f64,
 }
 
@@ -669,5 +822,35 @@ mod tests {
         let (hi, lo) = split_dmat4_for_wgpu(dmat);
         let reconstructed_x = (hi.w_axis.x as f64) + (lo.w_axis.x as f64);
         assert!((reconstructed_x - pos.x).abs() < 1e-7);
+    }
+
+    #[test]
+    fn test_geodetic_deserialization_sanitization_rejects_nan_and_out_of_bounds() {
+        // Valid coordinate passes
+        let valid_json = r#"{"latitude":35.6586,"longitude":139.7454,"altitude_meters":25.0}"#;
+        let parsed: Result<Wgs84GeoCoord, _> = serde_json::from_str(valid_json);
+        assert!(parsed.is_ok());
+
+        // Out-of-bounds latitude (> 90.0) rejected at Serde boundary
+        let bad_lat_json = r#"{"latitude":95.5,"longitude":139.7454,"altitude_meters":25.0}"#;
+        assert!(serde_json::from_str::<Wgs84GeoCoord>(bad_lat_json).is_err());
+
+        // Out-of-bounds longitude (< -180.0) rejected
+        let bad_lon_json = r#"{"latitude":35.0,"longitude":-195.0,"altitude_meters":25.0}"#;
+        assert!(serde_json::from_str::<Wgs84GeoCoord>(bad_lon_json).is_err());
+
+        // Extreme altitude spoofing (1e20m) rejected
+        let bad_alt_json = r#"{"latitude":35.0,"longitude":139.0,"altitude_meters":1e20}"#;
+        assert!(serde_json::from_str::<Wgs84GeoCoord>(bad_alt_json).is_err());
+
+        // Direct checked constructor rejects NaN and Infinity
+        assert_eq!(
+            Wgs84GeoCoord::try_new_checked(f64::NAN, 139.0, 10.0),
+            Err(GeodeticValidationError::NonFiniteCoordinate("latitude"))
+        );
+        assert_eq!(
+            Wgs84GeoCoord::try_new_checked(35.0, f64::INFINITY, 10.0),
+            Err(GeodeticValidationError::NonFiniteCoordinate("longitude"))
+        );
     }
 }

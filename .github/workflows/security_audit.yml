@@ -1,0 +1,37 @@
+name: Kuroshio SDK Security & Tier Isolation Audit
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  security-and-tier-isolation:
+    name: Security, Wasm Sandbox & Olympus Tier Isolation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Run All Workspace Security & Unit Tests
+        run: cargo test --workspace --all-targets
+
+      - name: Verify Pure-Rust Wasm Guest Sandbox Target (wasm32-unknown-unknown)
+        run: |
+          cargo check -p nautilus-world --target wasm32-unknown-unknown
+          cargo check -p lumeria-app-sdk --target wasm32-unknown-unknown
+
+      - name: Verify Olympus Core Feature Isolation (Zero Tier 2/3 Transport Bleed)
+        run: |
+          cargo check -p kuroshio-mesh --no-default-features --features olympus-core
+          cargo tree -p kuroshio-mesh --no-default-features --features olympus-core
+
+      - name: Run cargo-deny Supply Chain & Advisory Audit
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources

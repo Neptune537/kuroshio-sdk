@@ -8,10 +8,20 @@ repository = "https://github.com/tritonSama/kuroshio-sdk"
 readme = "README.md"
 keywords = ["p2p", "mesh", "teams", "privacy", "kuroshio"]
 
+[features]
+default = ["mesh-transport", "enclave-vault"]
+# Core data-structure and Olympus seed envelope types only (zero heavy networking or Tier 2/3 runtime dependencies)
+olympus-core = []
+# Full peer-to-peer WebRTC / libp2p GossipSub transport and NAT traversal for Tier 2 & Tier 3 nodes
+mesh-transport = []
+# Hardware enclave key vault and ZeroizeOnDrop ephemeral secret wrappers
+enclave-vault = []
+
 [dependencies]
 nautilus-world = { path = "../nautilus-world" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
-ed25519-dalek = { version = "2.1", features = ["rand_core", "serde"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core", "serde", "zeroize"] }
+zeroize = { version = "1.8", features = ["derive"] }
 thiserror = "1.0"
