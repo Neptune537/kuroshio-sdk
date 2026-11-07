@@ -6,5 +6,6 @@ members = [
     "crates/lumeria-host-runner",
     "programs/coral-escrow",
     "examples/hello_team",
+    "examples/open_world_mod_and_escrow",
 ]
 resolver = "2"

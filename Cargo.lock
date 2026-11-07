@@ -320,6 +320,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "open_world_mod_and_escrow"
+version = "0.1.0"
+dependencies = [
+ "kuroshio-mesh",
+ "lumeria-app-sdk",
+ "nautilus-world",
+ "sha2",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

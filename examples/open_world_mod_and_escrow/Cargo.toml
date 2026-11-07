@@ -1,0 +1,10 @@
+[package]
+name = "open_world_mod_and_escrow"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kuroshio-mesh = { path = "../../crates/kuroshio-mesh" }
+lumeria-app-sdk = { path = "../../crates/lumeria-app-sdk" }
+nautilus-world = { path = "../../crates/nautilus-world" }
+sha2 = "0.10"
