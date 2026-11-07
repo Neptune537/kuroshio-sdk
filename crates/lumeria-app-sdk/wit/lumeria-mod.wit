@@ -1,0 +1,118 @@
+package lumeria:modding@0.2.0;
+
+/// D&D Dice Roll and Attribute Hooks
+interface dice-roller {
+    enum dice-type {
+        d4,
+        d6,
+        d8,
+        d10,
+        d12,
+        d20,
+        d100,
+    }
+
+    record roll-request {
+        dice: dice-type,
+        count: u32,
+        modifier: s32,
+        advantage: bool,
+        disadvantage: bool,
+        reason: string,
+    }
+
+    record roll-outcome {
+        total: s32,
+        natural-rolls: list<u32>,
+        modifier: s32,
+        is-critical-success: bool,
+        is-critical-failure: bool,
+    }
+
+    /// Evaluates a verified D&D roll hook
+    roll-check: func(req: roll-request) -> roll-outcome;
+}
+
+/// Real-time Combat and Status Events
+interface combat-events {
+    enum damage-type {
+        slashing,
+        piercing,
+        bludgeoning,
+        fire,
+        cold,
+        lightning,
+        radiant,
+        necrotic,
+        force,
+    }
+
+    record combatant {
+        id: u64,
+        name: string,
+        max-hp: f32,
+        current-hp: f32,
+        armor-class: u32,
+        initiative: s32,
+    }
+
+    record attack-intent {
+        attacker-id: u64,
+        target-id: u64,
+        weapon-name: string,
+        attack-bonus: s32,
+        damage-dice: string,
+        dmg-type: damage-type,
+    }
+
+    record combat-resolution {
+        hit: bool,
+        critical: bool,
+        damage-dealt: f32,
+        target-downed: bool,
+        combat-log: string,
+    }
+
+    /// Hook invoked on weapon swing or spell execution
+    on-attack: func(intent: attack-intent, target: combatant) -> combat-resolution;
+}
+
+/// Procedural Dungeon and Encounters Generator
+interface procedural-dungeon {
+    enum dungeon-theme {
+        abyssal-trench,
+        forgotten-citadel,
+        celestial-sanctum,
+        karman-ruins,
+        underground-vault,
+    }
+
+    record dungeon-room {
+        room-id: u32,
+        x: s32,
+        y: s32,
+        width: u32,
+        height: u32,
+        theme: dungeon-theme,
+        has-treasure: bool,
+        enemy-count: u32,
+        corridor-connections: list<u32>,
+    }
+
+    record dungeon-layout {
+        seed: u64,
+        level: u32,
+        rooms: list<dungeon-room>,
+        boss-room-id: u32,
+    }
+
+    /// Procedurally generates a verified dungeon floor
+    generate-floor: func(seed: u64, floor-level: u32, theme: dungeon-theme) -> dungeon-layout;
+}
+
+/// The master world mod guest contract
+world lumeria-mod {
+    import dice-roller;
+    import combat-events;
+    export procedural-dungeon;
+}

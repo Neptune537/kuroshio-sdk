@@ -11,6 +11,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+pub mod modding;
+pub use modding::*;
+
 /// Canonical WebAssembly Interface Types (`.wit`) specification embedded for tooling & validation.
 pub const LUMERIA_WIT_SPEC: &str = include_str!("../wit/lumeria-guest.wit");
 

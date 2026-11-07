@@ -13,6 +13,12 @@ pub use poh::*;
 pub mod zk_geo;
 pub use zk_geo::*;
 
+pub mod browser_mesh;
+pub use browser_mesh::*;
+
+pub mod htlc_geofence;
+pub use htlc_geofence::*;
+
 #[cfg(feature = "mesh-transport")]
 pub mod transport;
 #[cfg(feature = "mesh-transport")]

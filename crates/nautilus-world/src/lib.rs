@@ -33,6 +33,9 @@
 use glam::{DMat3, DMat4, DVec3, Mat4, Vec3, Vec4};
 use serde::{Deserialize, Serialize};
 
+pub mod cdlod;
+pub use cdlod::*;
+
 pub const WGS84_SEMI_MAJOR_AXIS_A: f64 = 6_378_137.0;
 pub const WGS84_FLATTENING_F: f64 = 1.0 / 298.257_223_563;
 pub const WGS84_ECCENTRICITY_SQ_E2: f64 = WGS84_FLATTENING_F * (2.0 - WGS84_FLATTENING_F);
