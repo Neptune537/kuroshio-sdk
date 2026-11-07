@@ -19,6 +19,9 @@ pub use browser_mesh::*;
 pub mod htlc_geofence;
 pub use htlc_geofence::*;
 
+pub mod siren_radio;
+pub use siren_radio::*;
+
 #[cfg(feature = "mesh-transport")]
 pub mod transport;
 #[cfg(feature = "mesh-transport")]

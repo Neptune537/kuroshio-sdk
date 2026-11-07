@@ -30,7 +30,7 @@
 //! - **Shader Precision Splitters:** Decomposes 64-bit `DMat4` model-view matrices and `DVec3`
 //!   vectors into high/low `f32` pairs for jitter-free WebGPU and Vulkan vertex pipelines.
 
-use glam::{DMat3, DMat4, DVec3, Mat4, Vec3, Vec4};
+pub use glam::{DMat3, DMat4, DVec3, Mat4, Vec3, Vec4};
 use serde::{Deserialize, Serialize};
 
 pub mod cdlod;
@@ -38,6 +38,9 @@ pub use cdlod::*;
 
 pub mod horizon_impostors;
 pub use horizon_impostors::*;
+
+pub mod open_world_systems;
+pub use open_world_systems::*;
 
 pub const WGS84_SEMI_MAJOR_AXIS_A: f64 = 6_378_137.0;
 pub const WGS84_FLATTENING_F: f64 = 1.0 / 298.257_223_563;

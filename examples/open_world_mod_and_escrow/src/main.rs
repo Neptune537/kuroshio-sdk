@@ -8,14 +8,16 @@
 
 use kuroshio_mesh::{
     BrowserMeshTransport, ChannelReliability, GeofencePublicInputs, Groth16Proof,
-    HtlcGeofenceEngine, MeshPayload, ZkGeofenceArrivalProof,
+    HtlcGeofenceEngine, MeshPayload, SirenRadioTuner, ZkGeofenceArrivalProof,
 };
 use lumeria_app_sdk::{
     AttackIntent, Combatant, DamageType, DiceType, DungeonTheme, LumeriaModHostEngine, RollRequest,
 };
 use nautilus_world::{
-    CdlodPlanetEngine, FarFieldHorizonManager, FloatingOriginCamera, HorizonImpostorKind,
-    HorizonLandmarkImpostor, TravelMode, Wgs84GeoCoord,
+    compute_target_lead_pip, AutonomousCyaniteHarvester, CdlodPlanetEngine, FarFieldHorizonManager,
+    FloatingOriginCamera, HorizonImpostorKind, HorizonLandmarkImpostor, OpenWorldStructureKind,
+    Osm3dExtrusionEngine, StarSkiffDogfightEngine, TravelMode, Wgs84GeoCoord,
+    WorldAnchoredStructure,
 };
 use sha2::{Digest, Sha256};
 
@@ -260,10 +262,98 @@ fn main() {
         "  • HTLC Contract 'bounty-erciyes-recon-01' Settled Trustlessly!"
     );
     println!(
-        "  • Payout Released: {:.2} CYAN ({} micro-CYAN) to {} without revealing raw GPS!",
+        "  • Payout Released: {:.2} CYAN ({} micro-CYAN) to {} without revealing raw GPS!\n",
         payout as f64 / 1_000_000.0,
         payout,
         explorer_did
     );
-    println!("\n✅ All 4 Kuroshio SDK Architectural Pillars Verified Successfully.");
+
+    // =========================================================================
+    // PILLAR 5: The Seven Daughters 24/7 Siren Radio & ATAK Resilient Failover
+    // =========================================================================
+    println!("[5/6] KUROSHIO-MESH: The Seven Daughters 24/7 Siren Radio & ATAK Failover");
+
+    let mut radio = SirenRadioTuner::new(20); // 20:00 UTC -> Electra (852 Hz)
+    println!("  • On Air Now: {}", radio.last_on_air_banter);
+    println!("  • Primary Cloud Stream: {}", radio.active_stream_url());
+    radio.report_stream_failure_and_failover();
+    let local_pi = radio.report_stream_failure_and_failover();
+    println!(
+        "  • ATAK Survivability Failover: {:?} -> {}",
+        local_pi.tier, local_pi.stream_url
+    );
+    let (daughter_did, tip_total) = radio.tip_active_daughter_coral(100_000);
+    println!(
+        "  • Coral Tip Sent: 0.10 CYAN to {} (Total: {} micro-CYAN)\n",
+        daughter_did, tip_total
+    );
+
+    // =========================================================================
+    // PILLAR 6: Priority 1-4 Open-World C&C Base, OSM 77034 Extrusion & Dogfighting
+    // =========================================================================
+    println!("[6/6] NAUTILUS-WORLD: 3D C&C Base, OSM 77034->Downtown Extrusion & Dogfighting");
+
+    let node_77034 = Wgs84GeoCoord::new(29.6075, -95.1585, 15.0);
+    let crystal_geo = Wgs84GeoCoord::new(29.6081, -95.1585, 15.0);
+    let landing_pad = WorldAnchoredStructure::new(
+        "pad-77034-alpha",
+        &explorer_did,
+        OpenWorldStructureKind::StarSkiffLandingPad,
+        node_77034,
+        0.0,
+    );
+    let mut harvester =
+        AutonomousCyaniteHarvester::new("harv-77034-01", "ref-77034", node_77034, crystal_geo);
+    let mut cyanite_collected = 0;
+    for _ in 0..60 {
+        cyanite_collected += harvester.tick(0.5);
+    }
+    println!(
+        "  • Priority 1 (3D C&C Base): Pad '{}' Ready={} | Autonomous Harvester Unloaded: {} Cyanite",
+        landing_pad.structure_id,
+        landing_pad.can_land_star_skiff(node_77034.to_ecef()),
+        cyanite_collected
+    );
+
+    let osm_engine = Osm3dExtrusionEngine::new_houston_77034_corridor();
+    let extruded = osm_engine.query_extruded_volumes_near_camera(node_77034.to_ecef(), 30_000.0);
+    println!(
+        "  • Priority 2 (OSM 3D Extrusion): {} volumetric skyscrapers/hubs & {} road corridor (77034 -> Downtown Houston)",
+        extruded.len(),
+        osm_engine.road_corridors.len()
+    );
+
+    mesh.join_geographic_sector("sector_77034");
+    println!(
+        "  • Priority 3 (Sector Mesh): Joined {:?} with 5km Radar Voice Proximity",
+        mesh.active_squad_room_id.as_deref().unwrap_or("none")
+    );
+
+    let mut dogfight = StarSkiffDogfightEngine::new_patrol_wing();
+    let skiff_pos = nautilus_world::Vec3::new(0.0, 650.0, 0.0);
+    if let Some(target) = dogfight.lock_closest_target(skiff_pos).cloned() {
+        let pip = compute_target_lead_pip(
+            skiff_pos,
+            nautilus_world::Vec3::ZERO,
+            target.position_rel,
+            target.velocity_mps,
+            dogfight.pulse_muzzle_velocity_mps,
+        );
+        dogfight.fire_pulse_cannons(skiff_pos, pip - skiff_pos);
+        let mut events = Vec::new();
+        for _ in 0..30 {
+            events.extend(dogfight.tick(0.05));
+        }
+        println!(
+            "  • Priority 4 (Star-Skiff Dogfighting): Locked '{}' @ {:.0}m | Lead Pip: [{:.1}, {:.1}, {:.1}] | Event: {}",
+            target.callsign,
+            target.altitude_m,
+            pip.x,
+            pip.y,
+            pip.z,
+            events.first().map(|s| s.as_str()).unwrap_or("TRACKING")
+        );
+    }
+
+    println!("\n✅ All 6 Kuroshio SDK Architectural Pillars Verified Successfully.");
 }

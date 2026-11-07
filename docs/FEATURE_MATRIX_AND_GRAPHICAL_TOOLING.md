@@ -92,6 +92,36 @@ graph TD
   - ChaCha20-Poly1305 encrypted `.nautpak` containers decrypted directly into GPU VRAM.
   - `ai_gate` Price Guard firewall blocking prompt-injection attacks on shopping cart payloads.
 
+### 5. The Seven Daughters 24/7 Siren Radio & ATAK Resilient Failover (`kuroshio-mesh::siren_radio`)
+- **Where to find it in the SDK**: `kuroshio_mesh::siren_radio::{SirenRadioTuner, SirenDaughter, SirenChannelPreset, SirenEndpointTier}`
+- **Canonical 24-Hour Solfeggio Broadcaster Wheel**:
+  - `Maia` (432 Hz • 04:00–08:00 UTC • Dawn Oceanic Ambient & Horizon Chill)
+  - `Alcyone` (528 Hz • 08:00–12:00 UTC • High-Speed Cyberpunk D&B & Breakbeats)
+  - `Asterope` (639 Hz • 12:00–16:00 UTC • Tactical Deep House & Frontline Reports)
+  - `Celaeno` (741 Hz • 16:00–20:00 UTC • Glitch, Industrial Bass & Storm Chaser)
+  - `Electra` (852 Hz • 20:00–00:00 UTC • Vocal Trance, Eurobeat & Club Atlantis)
+  - `Taygete` (963 Hz • 00:00–02:00 UTC • Darkwave, Minimal Techno & Abyssal Drone)
+  - `Merope` (396 Hz • 02:00–04:00 UTC • Lo-Fi & Starlight Harbor Acoustic)
+- **ATAK Multi-Tier Resilient Stream Failover (`report_stream_failure_and_failover`)**:
+  1. Primary Cloud Atlantis Hub (`https://radio.tr7n7t7.com/live.mp3`)
+  2. Distributed Hugging Face Space Relay (`https://josh375-triton-tier1-hub.hf.space/live.mp3`)
+  3. Local Club Home Node Raspberry Pi Survivability Fallback (`http://10.0.0.237:8080/live.mp3`)
+  4. Localhost Edge Daemon (`http://127.0.0.1:8082/live.mp3`)
+- **Sabine $RT_{60}$ Spatial Acoustics & Coral Tipping**:
+  - `compute_spatial_acoustics(listener_geo, room_volume_m3, absorption_sabins)`
+  - `tip_active_daughter_coral(100_000)` (instant 0.1 CYAN micro-tipping).
+
+### 6. Open-World C&C Base-Building, OSM 77034 Extrusion & Star-Skiff Dogfighting (`nautilus-world::open_world_systems`)
+- **Priority 1 — 3D Open-World C&C Base-Building & Harvesters**:
+  - `WorldAnchoredStructure` & `OpenWorldStructureKind` (`CommandCenter`, `FusionPowerGenerator`, `CyaniteRefinery`, `StarSkiffLandingPad`, `PointDefenseTurret`, `OrbitalIonUplink`) with `can_land_star_skiff(skiff_ecef)`.
+  - `AutonomousCyaniteHarvester`: 4-stage physical state machine rolling between refineries and crystal deposits.
+- **Priority 2 — Real OpenStreetMap (OSM) 3D Extrusion (`Node 77034` -> `Downtown Houston`)**:
+  - `Osm3dExtrusionEngine::new_houston_77034_corridor()` pre-loaded with Clear Lake `77034` command hubs, the `I-45 Gulf Freeway` vector corridor, and `Downtown Houston` volumetric skyscrapers (`JPMorgan Chase Tower`, `Wells Fargo Plaza`, `Williams Tower`).
+- **Priority 3 — Geographic Sector Mesh Sync (`sector_77034`)**:
+  - `BrowserMeshTransport::join_geographic_sector("sector_77034")` and `is_pilot_within_5km_radar(local_ecef, remote_ecef)`.
+- **Priority 4 — Aerial Dogfighting & Star-Skiff Weapons Systems (`500m - 1,500m` Altitude)**:
+  - `StarSkiffDogfightEngine`: `[T]` closest-target lock (`lock_closest_target`), dual pulse cannon fire (`fire_pulse_cannons`), rogue patrol drone flight paths, and 3D ballistic lead-indicator pip calculation (`compute_target_lead_pip`).
+
 ---
 
 ## Part 2: Recommended Graphical Tooling Architecture

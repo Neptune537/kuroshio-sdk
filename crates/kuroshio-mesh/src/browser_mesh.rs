@@ -129,6 +129,26 @@ impl BrowserMeshTransport {
         self.subscribed_topics.insert(format!("squad:{}:dice", room_id));
     }
 
+    /// Joins a geographic sector mesh room (e.g. `sector_77034`) for Star-Skiff multiplayer sync
+    /// and 5km radar proximity tactical chat.
+    pub fn join_geographic_sector(&mut self, sector_id: &str) {
+        let clean = sector_id.trim_start_matches("sector_");
+        let room = format!("sector_{}", clean);
+        self.active_squad_room_id = Some(room.clone());
+        self.subscribed_topics.insert(format!("{}:skiff_flight", room));
+        self.subscribed_topics.insert(format!("{}:atak_pings", room));
+        self.subscribed_topics.insert(format!("{}:radar_5km_voice", room));
+    }
+
+    /// Filters a broadcast or voice frame by checking whether the remote Star-Skiff pilot is within
+    /// the 5.0 km (`5,000m`) tactical radar envelope.
+    pub fn is_pilot_within_5km_radar(local_ecef: [f64; 3], remote_ecef: [f64; 3]) -> bool {
+        let dx = local_ecef[0] - remote_ecef[0];
+        let dy = local_ecef[1] - remote_ecef[1];
+        let dz = local_ecef[2] - remote_ecef[2];
+        (dx * dx + dy * dy + dz * dz) <= (5_000.0 * 5_000.0)
+    }
+
     /// Registers a newly established peer connection (e.g. from WebRTC onopen).
     pub fn on_peer_connected(&mut self, peer_id: String, reliability: ChannelReliability) {
         self.peers.insert(
