@@ -108,6 +108,12 @@ The official public open SDK for building **decentralized teams, social squads, 
 
 
 
+## 🌟 Complete Feature Matrix & Graphical Tooling Guide
+
+For a detailed breakdown of all mandatory SDK features and the official graphical engineering stack (Bevy ECS, wgpu, WGSL, and 3D Gaussian Splats), see [docs/FEATURE_MATRIX_AND_GRAPHICAL_TOOLING.md](docs/FEATURE_MATRIX_AND_GRAPHICAL_TOOLING.md).
+
+---
+
 ## 📦 Crates in this Workspace
 
 
